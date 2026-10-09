@@ -1,0 +1,24 @@
+appId: fixture.demo
+name: SolidFlow command coverage
+driver: chromium
+locale: en
+tags: [commands]
+---
+- launchApp
+- assertVisible: "Sign in"
+- tapOn: "Continue"
+- assertVisible: "Select a region."
+- assertVisible: "Invalid organization name"
+- executeScript: "document.getElementById('login-region').value='us'"
+- inputText: "login-tenantId|acme"
+- eraseText: "login-tenantId"
+- inputText: "login-tenantId|acme-corp"
+- copyTextFrom: "Sign in"
+- assertTrue: "solidflow.copiedText.includes('Sign in')"
+- hideKeyboard
+- scroll
+- waitForAnimationToEnd
+- tapOn: "Continue"
+- assertVisible: "Home"
+- takeScreenshot: home
+- stopApp

@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Popup host</title>
+  </head>
+  <body>
+    <button id="open-popup" type="button">Open popup</button>
+    <script>
+      document.getElementById("open-popup").addEventListener("click", () => {
+        const child = window.open("", "solidflow-popup");
+        if (!child) return;
+        child.document.write("<!DOCTYPE html><title>Popup</title><h1>Popup window</h1>");
+        child.document.close();
+      });
+    </script>
+  </body>
+</html>

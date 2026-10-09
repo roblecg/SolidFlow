@@ -1,0 +1,16 @@
+node_modules/
+bin/
+desktop/bin/
+desktop/obj/
+dist/
+test-results/
+solidFlow-reports/
+solidFlow-reports-test/
+solidFlow-reports-cim/
+testx-reports/
+testx-reports-test/
+testx-reports-cim/
+*.log
+recorded.yaml
+solidFlow.config.yaml
+testx.config.yaml

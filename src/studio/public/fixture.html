@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Practice login</title>
+    <style>
+      body { font-family: Segoe UI, sans-serif; margin: 24px; color: #1c2330; }
+      label { display: block; margin: 12px 0 4px; }
+      input, select, button { font: inherit; padding: 8px; width: 100%; box-sizing: border-box; }
+      .error { color: #b42318; margin: 6px 0; }
+      #home { display: none; }
+    </style>
+  </head>
+  <body>
+    <form id="login">
+      <h1>Sign in</h1>
+      <label for="login-region">Region</label>
+      <select id="login-region">
+        <option value="">Select a region</option>
+        <option value="us">United States</option>
+      </select>
+      <p id="region-error" class="error" hidden>Select a region.</p>
+      <label for="login-tenantId">Organization</label>
+      <input id="login-tenantId" />
+      <p id="org-error" class="error" hidden>Invalid organization name</p>
+      <button id="continue" type="submit">Continue</button>
+    </form>
+    <main id="home">
+      <h1>Home</h1>
+    </main>
+    <script>
+      document.getElementById("login").addEventListener("submit", event => {
+        event.preventDefault();
+        const region = document.getElementById("login-region").value;
+        const org = document.getElementById("login-tenantId").value.trim();
+        document.getElementById("region-error").hidden = Boolean(region);
+        document.getElementById("org-error").hidden = org.length > 0;
+        if (!region || !org) return;
+        document.getElementById("login").hidden = true;
+        document.getElementById("home").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

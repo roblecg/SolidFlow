@@ -1,0 +1,16 @@
+appId: fixture.demo
+name: Fixture smoke
+driver: chromium
+locale: en
+tags: [smoke]
+---
+- launchApp
+- tapOn: "Continue"
+- assertVisible: "Select a region."
+- assertVisible: "Invalid organization name"
+- executeScript: "document.getElementById('login-region').value='us'"
+- inputText: "login-tenantId|acme-corp"
+- tapOn: "Continue"
+- assertVisible: "Home"
+- takeScreenshot: home
+- stopApp

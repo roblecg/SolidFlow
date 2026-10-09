@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solidFlow.local/schema/flow.schema.json",
+  "title": "SolidFlow Flow",
+  "type": "object",
+  "anyOf": [{ "required": ["appId"] }, { "required": ["appPath"] }],
+  "properties": {
+    "appId": { "type": "string", "minLength": 1 },
+    "appPath": { "type": "string", "minLength": 1 },
+    "name": { "type": "string" },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "locale": { "type": "string", "default": "en" },
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "driver": {
+      "type": "string",
+      "enum": ["webview2", "chromium", "android", "ios", "browser"]
+    },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/step" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "step": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "launchApp",
+            "stopApp",
+            "clearState",
+            "killApp",
+            "back",
+            "hideKeyboard",
+            "pasteText",
+            "scroll",
+            "eraseText",
+            "assertDarkMode",
+            "assertLightMode",
+            "toggleDarkMode",
+            "waitForAnimationToEnd",
+            "waitForPopup",
+            "switchToMain"
+          ]
+        },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "number" },
+              { "type": "boolean" },
+              { "type": "array" },
+              { "type": "object" }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

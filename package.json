@@ -1,0 +1,39 @@
+{
+  "name": "solidFlow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SolidFlow desktop E2E runner with WebView2 CDP driver",
+  "bin": {
+    "solidFlow": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "doctor": "tsx src/cli.ts doctor",
+    "studio": "dotnet build desktop/SolidFlow.csproj -c Release -o bin/app && bin\\app\\SolidFlow.exe",
+    "studio:web": "tsx src/cli.ts studio",
+    "app": "dotnet build desktop/SolidFlow.csproj -c Release -o bin/app && bin\\app\\SolidFlow.exe",
+    "oss": "node scripts/oss-check.mjs",
+    "lint": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=24.20.0"
+  },
+  "dependencies": {
+    "pixelmatch": "^7.1.0",
+    "playwright-core": "^1.55.0",
+    "pngjs": "^7.0.0",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.4",
+    "@types/pngjs": "^6.0.5",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.0"
+  },
+  "license": "MIT"
+}

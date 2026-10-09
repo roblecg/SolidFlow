@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationTitle>SolidFlow</ApplicationTitle>
+    <AssemblyName>SolidFlow</AssemblyName>
+    <RootNamespace>SolidFlow</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <Version>0.1.0</Version>
+    <Description>SolidFlow desktop window</Description>
+    <Company>SolidFlow</Company>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- BSD-3-Clause. Confirmed again by scripts/oss-check.mjs after restore. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
+  </ItemGroup>
+  <Target Name="DropUnusedWebView2Wpf" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="$([System.String]::Copy('%(Identity)').Contains('Microsoft.Web.WebView2.Wpf'))" />
+    </ItemGroup>
+  </Target>
+</Project>

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SolidFlow preview</title>
+    <link rel="stylesheet" href="/studio.css" />
+    <style>
+      body { min-width: 0; }
+      .preview-app { display: flex; flex-direction: column; height: 100%; }
+      .preview-bar { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: white; border-bottom: 1px solid var(--line); }
+      .preview-stage {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        padding: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        container-type: size;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="preview-app">
+      <header class="preview-bar">
+        <strong>Inspect</strong>
+        <span class="muted">Click a control, then choose a command. It is inserted in the studio.</span>
+      </header>
+      <div class="preview-stage">
+        <div id="stage" class="stage">
+          <div class="empty">Connect the app from SolidFlow first.</div>
+        </div>
+      </div>
+    </div>
+    <div id="menu" class="menu" hidden></div>
+    <script src="/command-menu.js"></script>
+    <script>
+      const stage = document.getElementById("stage");
+      const menu = document.getElementById("menu");
+      const channel = new BroadcastChannel("solidFlow-studio");
+      let nodes = [];
+      let imageSize = { width: 1, height: 1 };
+      let poll = 0;
+      let previewSeq = -1;
+
+      function yamlStep(command, selector) {
+        const needsQuotes = /[:#\n"']|\s/.test(selector);
+        const value = needsQuotes ? JSON.stringify(selector) : selector;
+        if (command === "inputText") return `- inputText: ${JSON.stringify(selector + "|")}`;
+        if (!selector) return `- ${command}`;
+        return `- ${command}: ${value}`;
+      }
+
+      async function api(path, options) {
+        const res = await fetch(path, { headers: { "content-type": "application/json" }, ...options });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error || res.statusText);
+        return body;
+      }
+
+      function render(snap) {
+        nodes = snap.nodes || [];
+        stage.innerHTML = "";
+        if (!snap.image) {
+          stage.style.removeProperty("--stage-ratio");
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = snap.error || "Connect the app from SolidFlow first.";
+          stage.append(empty);
+          return;
+        }
+        const img = document.createElement("img");
+        img.src = snap.image;
+        img.alt = "Device screenshot";
+        img.onload = () => {
+          imageSize = { width: img.naturalWidth, height: img.naturalHeight };
+          if (imageSize.height > 0) stage.style.setProperty("--stage-ratio", String(imageSize.width / imageSize.height));
+        };
+        img.addEventListener("click", event => {
+          event.preventDefault();
+          event.stopPropagation();
+          const rect = img.getBoundingClientRect();
+          void pick((event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height, event.clientX, event.clientY);
+        });
+        stage.append(img);
+        const box = document.createElement("div");
+        box.className = "highlight";
+        box.hidden = true;
+        stage.append(box);
+        img.onmousemove = event => {
+          const rect = img.getBoundingClientRect();
+          const x = ((event.clientX - rect.left) / rect.width) * (imageSize.width || rect.width);
+          const y = ((event.clientY - rect.top) / rect.height) * (imageSize.height || rect.height);
+          const hits = nodes.filter(node => x >= node.bounds.x && y >= node.bounds.y && x <= node.bounds.x + node.bounds.width && y <= node.bounds.y + node.bounds.height);
+          hits.sort((a, b) => a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height);
+          const hit = hits[0];
+          if (!hit) { box.hidden = true; return; }
+          const scaleX = rect.width / (imageSize.width || rect.width);
+          const scaleY = rect.height / (imageSize.height || rect.height);
+          box.hidden = false;
+          box.style.left = hit.bounds.x * scaleX + "px";
+          box.style.top = hit.bounds.y * scaleY + "px";
+          box.style.width = hit.bounds.width * scaleX + "px";
+          box.style.height = hit.bounds.height * scaleY + "px";
+        };
+      }
+
+      async function pick(nx, ny, clientX, clientY) {
+        window.clearInterval(poll);
+        const hit = await api("/api/pick", { method: "POST", body: JSON.stringify({ nx, ny }) });
+        if (!hit.selector) { start(); return; }
+        void window.SolidFlowMenu.open(menu, clientX, clientY, {
+          selector: hit.selector,
+          onInsert: yaml => {
+            channel.postMessage({ type: "insert", line: yaml });
+            menu.hidden = true;
+            start();
+          },
+          onRun: yaml => {
+            channel.postMessage({ type: "insert", line: yaml, run: true });
+            menu.hidden = true;
+            start();
+          }
+        });
+      }
+
+      async function refresh() {
+        if (!menu.hidden) return;
+        try {
+          const snap = await api("/api/session");
+          if (snap.seq != null && snap.seq === previewSeq) return;
+          if (snap.seq != null) previewSeq = snap.seq;
+          if (snap.image || snap.error) render(snap);
+        } catch { /* keep the last frame */ }
+      }
+
+      function start() {
+        window.clearInterval(poll);
+        poll = window.setInterval(refresh, 1200);
+        void refresh();
+      }
+
+      document.addEventListener("click", event => {
+        if (!menu.contains(event.target)) menu.hidden = true;
+      });
+      start();
+    </script>
+  </body>
+</html>

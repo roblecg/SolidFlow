@@ -1,0 +1,12 @@
+appId: fixture.demo
+name: Popup window
+driver: chromium
+locale: en
+---
+- launchApp
+- tapOn: "Open popup"
+- waitForPopup
+- assertVisible: "Popup window"
+- switchToMain
+- assertVisible: "Open popup"
+- stopApp

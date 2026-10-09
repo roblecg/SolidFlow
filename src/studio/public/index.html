@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SolidFlow</title>
+    <link rel="stylesheet" href="/studio.css" />
+  </head>
+  <body>
+    <div class="app inspect">
+      <header class="titlebar">
+        <div class="titlebar-lead">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true"></span>
+            <span>SolidFlow</span>
+          </div>
+          <button id="workspace" class="workspace-btn" type="button" title="Select workspace" aria-label="Select workspace">
+            <span class="workspace-icon" aria-hidden="true"></span>
+            <span class="workspace-copy">
+              <span class="workspace-kicker">Workspace</span>
+              <span id="workspace-name">Select workspace</span>
+            </span>
+            <span class="workspace-chevron" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div class="window-controls" hidden>
+          <button id="win-min" class="win-btn" type="button" aria-label="Minimize">
+            <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M1 5.5h8" stroke="currentColor" stroke-width="1"/></svg>
+          </button>
+          <button id="win-max" class="win-btn" type="button" aria-label="Maximize">
+            <svg class="icon-max" viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+            <svg class="icon-restore" viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M3 2.5h5.5V8M2 4h5.5V9.5H2z" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+          </button>
+          <button id="win-close" class="win-btn win-btn-close" type="button" aria-label="Close">
+            <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1"/></svg>
+          </button>
+        </div>
+      </header>
+      <div class="commandbar">
+        <div class="command-start">
+          <div class="mode-switch" role="tablist" aria-label="Studio mode">
+            <button id="mode-inspect" class="mode-tab active" type="button" role="tab" aria-selected="true">Inspect</button>
+            <button id="mode-record" class="mode-tab" type="button" role="tab" aria-selected="false">Record</button>
+          </div>
+          <span id="mode-status" class="mode-status">Inspect — click the preview</span>
+          <button id="popout" class="tool-btn" type="button">Pop out</button>
+        </div>
+        <div class="command-end">
+          <button id="connect-app" class="tool-btn tool-btn-strong" type="button">Connect app</button>
+          <button id="connect-fixture" class="tool-btn" type="button">Connect fixture</button>
+          <span class="toolbar-sep" aria-hidden="true"></span>
+          <button id="disconnect" class="tool-btn tool-btn-quiet" type="button">Disconnect</button>
+        </div>
+      </div>
+      <section class="pane side">
+          <div id="inspect-panel" class="device-wrap">
+            <div id="stage" class="stage">
+              <div class="empty">Connect the app, then click a control in this preview to insert a YAML command.</div>
+            </div>
+          </div>
+          <div id="preview-split" class="split split-h" data-split="preview" role="separator" aria-orientation="horizontal" aria-label="Resize preview" tabindex="0"></div>
+          <div id="record-panel" class="record-note" hidden>
+            Record mode listens to the real CIM window. Click and type there. Each action is added to the YAML.
+          </div>
+          <div class="commands" id="commands"></div>
+      </section>
+      <div class="split split-v" data-split="side" role="separator" aria-orientation="vertical" aria-label="Resize inspect panel" tabindex="0"></div>
+      <div class="work">
+        <main class="workspace inspect">
+        <section class="pane editor-pane">
+          <div class="editor-head">
+            <strong id="file-label">No file</strong>
+            <span class="spacer"></span>
+            <button id="save" class="btn">Save</button>
+          </div>
+          <textarea id="editor" spellcheck="false" placeholder="Select or create a flow…"></textarea>
+        </section>
+        <div class="split split-v" data-split="flows" role="separator" aria-orientation="vertical" aria-label="Resize flows panel" tabindex="0"></div>
+        <section class="pane flows-pane">
+          <div id="tree" class="tree" role="tree"></div>
+          <button id="new-file" class="tree-new" type="button"><span class="plus" aria-hidden="true">+</span> New file</button>
+        </section>
+        </main>
+      <div class="split split-h" data-split="log" role="separator" aria-orientation="horizontal" aria-label="Resize log panel" tabindex="0"></div>
+      <section class="log-panel">
+        <div class="log-tabs">
+          <button id="tab-test" class="log-tab active" type="button">Test logs</button>
+          <button id="tab-app" class="log-tab" type="button">App logs</button>
+          <span id="status" class="status muted"></span>
+          <span class="spacer"></span>
+          <button id="run" class="btn btn-primary" type="button">Run test</button>
+        </div>
+        <div id="test-logs" class="log-body"></div>
+        <div id="app-logs" class="log-body" hidden>
+          <input id="log-search" type="search" placeholder="Search keywords" />
+          <div id="app-log-list"></div>
+        </div>
+        <button id="clear-logs" class="clear-logs" type="button">Clear history</button>
+      </section>
+      </div>
+    </div>
+    <div id="folder-modal" class="folder-modal" hidden>
+      <div class="folder-card" role="dialog" aria-modal="true" aria-labelledby="folder-title">
+        <h2 id="folder-title">Select workspace</h2>
+        <button id="folder-current" class="folder-select" type="button">
+          <span id="folder-mark" class="folder-mark" aria-hidden="true"></span>
+          <span id="folder-label" class="folder-label">Choose a folder</span>
+          <span class="folder-chevron" aria-hidden="true"></span>
+        </button>
+        <div id="folder-places" class="folder-places"></div>
+        <div class="folder-foot">
+          <button id="folder-clear" class="folder-clear" type="button" hidden>Clear</button>
+          <button id="folder-done" class="folder-done" type="button" disabled>Done</button>
+        </div>
+      </div>
+    </div>
+    <div id="menu" class="menu" hidden></div>
+    <div id="file-menu" class="menu file-menu" hidden>
+      <button type="button" data-action="file">New File <kbd>Ctrl+N</kbd></button>
+      <button type="button" data-action="folder">New Folder</button>
+      <div class="sep"></div>
+      <button type="button" data-action="reveal">Show in Explorer</button>
+    </div>
+    <script src="/command-menu.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
