@@ -28,14 +28,14 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
   async disconnect(): Promise<void> {
     if (this.browser) {
       await this.browser.close().catch(() => {});
-      this.browser = null;
-      this.page = null;
-      this.mainPage = null;
-      this.adoptedPages.clear();
-      this.focusedNativeWindow = null;
-      this.nativePopupBaseline.clear();
-      this.adoptedNativePopups.clear();
     }
+    this.browser = null;
+    this.page = null;
+    this.mainPage = null;
+    this.adoptedPages.clear();
+    this.focusedNativeWindow = null;
+    this.nativePopupBaseline.clear();
+    this.adoptedNativePopups.clear();
   }
 
   async waitForPopup(timeoutMs: number): Promise<void> {

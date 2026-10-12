@@ -79,4 +79,8 @@ export class WebView2Driver extends PlaywrightBaseDriver {
       ...(this.focusedNativeWindow ? { hwnd: this.focusedNativeWindow.hwnd } : {})
     };
   }
+
+  profileDir(): string | undefined {
+    return this.userDataDir || this.ctx?.userDataDir;
+  }
 }

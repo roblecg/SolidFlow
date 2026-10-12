@@ -49,6 +49,8 @@ type ExecState = {
   lastLocator?: LocatorMatch;
   script: ReturnType<typeof createScriptState>;
   colorScheme: "light" | "dark";
+  /** Kept across stopApp / relaunch so the app profile is reused until clearState. */
+  userDataDir?: string;
 };
 
 export type DriverSlot = { current: AutomationDriver | null };
@@ -319,9 +321,16 @@ async function executeStepBody(
   if (await shouldSkip(parsed, state, flow, ctx)) return;
 
   if (name === "launchApp") {
-    if (parsed.kind === "complex" && isRecord(parsed.value) && parsed.value.clearState === true && state.driver) {
-      await state.driver.clearState();
-      await state.driver.disconnect();
+    const clear =
+      parsed.kind === "complex" && isRecord(parsed.value) && parsed.value.clearState === true;
+    if (state.driver && (clear || !driverSessionOpen(state.driver))) {
+      if (clear) {
+        await state.driver.clearState().catch(() => {});
+        state.userDataDir = undefined;
+      } else {
+        state.userDataDir = state.driver.profileDir?.() ?? state.userDataDir;
+      }
+      await state.driver.disconnect().catch(() => {});
       state.driver = null;
     }
     await ensureDriver(state, flow, ctx);
@@ -366,13 +375,15 @@ async function executeStepBody(
       case "stopApp":
         if (ctx.paceMs) await delay(ctx.paceMs);
         if (state.driver) {
-          await state.driver.disconnect();
+          state.userDataDir = state.driver.profileDir?.() ?? state.userDataDir;
+          await state.driver.disconnect().catch(() => {});
           state.driver = null;
         }
         return;
       case "clearState":
         if (!state.driver) await ensureDriver(state, flow, ctx);
         await state.driver!.clearState();
+        state.userDataDir = state.driver!.profileDir?.();
         return;
       case "scroll":
         if (!state.driver) await ensureDriver(state, flow, ctx);
@@ -776,7 +787,28 @@ async function presentTarget(
   await delay(Math.max(400, Math.min(paceMs, 800)));
 }
 
+function driverSessionOpen(driver: AutomationDriver): boolean {
+  try {
+    if (driver.getPage().isClosed()) return false;
+  } catch {
+    return false;
+  }
+  const native = driver.nativeApp();
+  if (!native?.pid) return true;
+  try {
+    process.kill(native.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function ensureDriver(state: ExecState, flow: FlowDocument, ctx: StepCtx): Promise<void> {
+  if (state.driver && !driverSessionOpen(state.driver)) {
+    state.userDataDir = state.driver.profileDir?.() ?? state.userDataDir;
+    await state.driver.disconnect().catch(() => {});
+    state.driver = null;
+  }
   if (state.driver) {
     if (ctx.paceMs) await state.driver.getPage().bringToFront().catch(() => {});
     return;
@@ -788,9 +820,11 @@ async function ensureDriver(state: ExecState, flow: FlowDocument, ctx: StepCtx):
     appPath: ctx.appPath,
     fixtureUrl: ctx.fixtureUrl,
     headless: ctx.headless,
-    screenshotDir: ctx.screenshotDir
+    screenshotDir: ctx.screenshotDir,
+    userDataDir: state.userDataDir
   });
   state.driver = driver;
+  state.userDataDir = driver.profileDir?.() ?? state.userDataDir;
 }
 
 function formatStep(step: FlowStep): string {
