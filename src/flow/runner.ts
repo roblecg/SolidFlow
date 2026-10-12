@@ -28,11 +28,15 @@ import { createScriptState, evalFlowExpression } from "./script-env.js";
 import { desktopCommandNeedsPage, executeDesktopCommand } from "./desktop-commands.js";
 import {
   captionActionFor,
+  invokeNativeControl,
   nativeControlVisible,
+  nativeTextVisible,
   pagePixelHint,
   parseWindowControl,
   performCaptionAction,
-  type CaptionAction
+  setNativeText,
+  type CaptionAction,
+  type NativeApp
 } from "../driver/native-frame.js";
 
 const activeAppLocks = new Set<string>();
@@ -353,7 +357,7 @@ async function executeStepBody(
     const driver = state.driver!;
     if (name === "switchToMain") await driver.switchToMain();
     else await driver.waitForPopup(popupTimeout(parsed.kind === "simple" ? undefined : parsed.value));
-    await focusAndAnnounce(driver, name, ctx.paceMs);
+    if (!driver.nativeApp()?.hwnd) await focusAndAnnounce(driver, name, ctx.paceMs);
     return;
   }
 
@@ -500,7 +504,7 @@ async function executeStepBody(
   if (!state.driver) await ensureDriver(state, flow, ctx);
   const driver = state.driver!;
   const page = driver.getPage();
-  await focusAndAnnounce(driver, name, ctx.paceMs);
+  if (!driver.nativeApp()?.hwnd) await focusAndAnnounce(driver, name, ctx.paceMs);
 
   const strVal = (v: unknown) => interpolateEnv(String(v), state.env);
 
@@ -532,6 +536,12 @@ async function executeStepBody(
         await actOnWindow(driver, caption);
         return;
       }
+      const dialog = activeNativeWindow(driver);
+      if (dialog) {
+        await invokeNativeControl(dialog, q);
+        await driver.releaseClosedNativeWindow();
+        return;
+      }
       const { locator, match } = await defaultLocatorResolver.resolve(page, q, index);
       state.lastLocator = match;
       await presentTarget(page, locator, ctx.paceMs);
@@ -552,8 +562,16 @@ async function executeStepBody(
       const raw = parsed.kind === "kv" ? parsed.value : parsed.value;
       const q = isRecord(raw) ? strVal(raw.text ?? "") : strVal(raw);
       const parts = q.split("|");
-      const text = parts.length > 1 ? parts.slice(1).join("|") : q;
-      const target = parts.length > 1 ? parts[0]! : undefined;
+      const typed = parts.length > 1 ? parts.slice(1).join("|") : q;
+      const field = parts.length > 1 ? parts[0]! : "";
+      const dialog = activeNativeWindow(driver);
+      if (dialog) {
+        await setNativeText(dialog, field, typed);
+        await driver.releaseClosedNativeWindow();
+        return;
+      }
+      const text = typed;
+      const target = field || undefined;
       if (target) {
         const { locator, match } = await defaultLocatorResolver.resolve(page, target);
         state.lastLocator = match;
@@ -625,6 +643,10 @@ async function executeStepBody(
         await assertWindowControl(driver, q, true, name === "waitForVisible" ? 30_000 : 10_000);
         return;
       }
+      if (activeNativeWindow(driver)) {
+        await assertNativeText(driver, q, true, name === "waitForVisible" ? 30_000 : 10_000);
+        return;
+      }
       const { locator, match } = await defaultLocatorResolver.resolve(page, q);
       state.lastLocator = match;
       await locator.waitFor({ state: "visible", timeout: name === "waitForVisible" ? 30_000 : 10_000 });
@@ -637,6 +659,10 @@ async function executeStepBody(
       const q = isRecord(raw) ? strVal(raw.text ?? raw.id ?? "") : strVal(raw);
       if (parseWindowControl(q)) {
         await assertWindowControl(driver, q, false, 30_000);
+        return;
+      }
+      if (activeNativeWindow(driver)) {
+        await assertNativeText(driver, q, false, 30_000);
         return;
       }
       const { locator, match } = await defaultLocatorResolver.resolve(page, q);
@@ -789,6 +815,43 @@ async function actOnWindow(driver: AutomationDriver, action: CaptionAction): Pro
     hint = undefined;
   }
   await performCaptionAction(native, action, hint);
+  await driver.releaseClosedNativeWindow();
+}
+
+function activeNativeWindow(driver: AutomationDriver): NativeApp | null {
+  const native = driver.nativeApp();
+  if (!native?.hwnd) return null;
+  return native;
+}
+
+async function assertNativeText(
+  driver: AutomationDriver,
+  selector: string,
+  wantVisible: boolean,
+  timeoutMs: number
+): Promise<void> {
+  const started = Date.now();
+  let saw = false;
+  let lastError = "";
+  for (;;) {
+    const native = activeNativeWindow(driver);
+    if (!native) {
+      if (!wantVisible) return;
+      break;
+    }
+    try {
+      const visible = await nativeTextVisible(native, selector);
+      saw = true;
+      lastError = "";
+      if (visible === wantVisible) return;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+    if (Date.now() - started >= timeoutMs) break;
+    await delay(200);
+  }
+  if (!saw && lastError) throw new FlowError(lastError);
+  throw new FlowError(wantVisible ? `${selector} is not visible` : `${selector} is still visible`);
 }
 
 async function assertWindowControl(

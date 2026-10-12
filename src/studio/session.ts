@@ -10,8 +10,10 @@ import {
   compositePageIntoFrame,
   headerNodes,
   hitHeader,
+  hitNode,
   imageToPage,
   pagePixelHint,
+  presentFrame,
   type FrameLayout,
   type Rect
 } from "../driver/native-frame.js";
@@ -134,6 +136,9 @@ export async function pickAt(nx: number, ny: number): Promise<StudioNode | null>
     const y = yNorm * layout.height;
     const header = hitHeader(layout, x, y);
     if (header) return header;
+    const control = hitNode(layout.controls, x, y);
+    if (control) return control;
+    if (layout.popup) return null;
     const hint = await pagePixelHint(page);
     const point = imageToPage(layout, x, y, hint?.cssWidth ?? 1, hint?.cssHeight ?? 1);
     if (!point) return null;
@@ -287,7 +292,14 @@ async function frameOf(
   ]);
   let image = buffer;
   let layout: FrameLayout | null = null;
-  if (frame && frame.client.y >= 8) {
+  if (frame?.popup) {
+    try {
+      image = presentFrame(frame.png);
+    } catch {
+      image = frame.png;
+    }
+    layout = frame;
+  } else if (frame && frame.client.y >= 8) {
     try {
       image = compositePageIntoFrame(frame.png, buffer, frame.client);
       layout = frame;
@@ -300,12 +312,13 @@ async function frameOf(
   const cssW = hint?.cssWidth || 1;
   const cssH = hint?.cssHeight || 1;
   const pageSize = pngSize(buffer);
-  const scaleX = layout ? layout.client.width / cssW : pageSize.width / cssW;
-  const scaleY = layout ? layout.client.height / cssH : pageSize.height / cssH;
-  const nodes = hierarchy
-    ? flatten(hierarchy, scaleX, scaleY, layout?.client.x ?? 0, layout?.client.y ?? 0, layout?.client ?? null)
-    : [];
-  if (layout) nodes.push(...headerNodes(layout));
+  const scaleX = layout && !layout.popup ? layout.client.width / cssW : pageSize.width / cssW;
+  const scaleY = layout && !layout.popup ? layout.client.height / cssH : pageSize.height / cssH;
+  const nodes =
+    hierarchy && !layout?.popup
+      ? flatten(hierarchy, scaleX, scaleY, layout?.client.x ?? 0, layout?.client.y ?? 0, layout?.client ?? null)
+      : [];
+  if (layout) nodes.push(...headerNodes(layout), ...layout.controls);
   const size = layout ?? pageSize;
   return {
     connected: true,

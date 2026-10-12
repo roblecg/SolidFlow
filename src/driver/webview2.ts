@@ -43,6 +43,7 @@ export class WebView2Driver extends PlaywrightBaseDriver {
     await this.connectOverCdp(wsUrl);
 
     await this.getPage().waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+    await this.rememberNativePopups();
   }
 
   async disconnect(): Promise<void> {
@@ -69,9 +70,13 @@ export class WebView2Driver extends PlaywrightBaseDriver {
     return { ...base, debugPort: this.debugPort, appPath: this.ctx?.appPath };
   }
 
-  nativeApp(): { pid: number; appPath: string } | null {
+  nativeApp(): { pid: number; appPath: string; hwnd?: string } | null {
     const appPath = this.ctx?.appPath;
     if (!appPath) return null;
-    return { pid: this.child?.pid ?? 0, appPath };
+    return {
+      pid: this.child?.pid ?? 0,
+      appPath,
+      ...(this.focusedNativeWindow ? { hwnd: this.focusedNativeWindow.hwnd } : {})
+    };
   }
 }

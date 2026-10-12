@@ -12,7 +12,9 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Collections.Generic;
 using System.Text;
+using System.Windows.Automation;
 using Microsoft.Win32;
 
 namespace SolidFlow {
@@ -55,7 +57,10 @@ namespace SolidFlow {
     [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int awareness);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc lpEnumFunc, IntPtr lParam);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr hWnd);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr hWnd);
     [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr hWnd);
@@ -70,6 +75,9 @@ namespace SolidFlow {
     [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")] static extern IntPtr SendMessageText(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")] static extern IntPtr SendMessageBuffer(IntPtr hWnd, uint Msg, IntPtr wParam, StringBuilder lParam);
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")] static extern IntPtr SendMessagePtr(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
@@ -96,13 +104,36 @@ namespace SolidFlow {
       try { SetProcessDPIAware(); } catch { }
     }
 
-    public static string Handle(string op, int procId, string appPath, int hintW, int hintH, int cssW, int cssH, string action) {
+    public static string Handle(string op, int procId, string appPath, int hintW, int hintH, int cssW, int cssH, string action, string hwndText, string name, string text) {
       Init();
       op = op ?? "";
-      IntPtr hwnd = Find(procId, appPath ?? "", hintW, hintH, cssW, cssH);
+      appPath = appPath ?? "";
+      if (op == "windows") return ListPopups(procId, appPath);
+      IntPtr requested = ParseHwnd(hwndText);
+      bool specific = requested != IntPtr.Zero;
+      if (specific && (op == "invoke" || op == "visible" || op == "value" || op == "caption")) {
+        if (!IsWindow(requested) || !Related(requested, procId, appPath)) return "{\"ok\":false,\"error\":\"window not found\"}";
+        if (op == "invoke") return InvokeNamed(requested, name ?? "");
+        if (op == "visible") return VisibleNamed(requested, name ?? "");
+        if (op == "value") return SetNamedValue(requested, name ?? "", text ?? "");
+        if (op == "read") return ReadNamed(requested, name ?? "");
+        return Caption(requested, action ?? "");
+      }
+      IntPtr hwnd = IntPtr.Zero;
+      bool popup = false;
+      if (specific && IsWindow(requested) && Related(requested, procId, appPath)) {
+        hwnd = requested;
+        popup = GetWindow(hwnd, GW_OWNER) != IntPtr.Zero || hwnd != Find(procId, appPath, hintW, hintH, cssW, cssH);
+      } else {
+        hwnd = Find(procId, appPath, hintW, hintH, cssW, cssH);
+      }
       if (hwnd == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
+      if (op == "invoke") return InvokeNamed(hwnd, name ?? "");
+      if (op == "visible") return VisibleNamed(hwnd, name ?? "");
+      if (op == "value") return SetNamedValue(hwnd, name ?? "", text ?? "");
+      if (op == "read") return ReadNamed(hwnd, name ?? "");
       if (op == "caption") return Caption(hwnd, action ?? "");
-      return Capture(hwnd, op == "capture");
+      return Capture(hwnd, op == "capture", popup);
     }
 
     static string Caption(IntPtr hwnd, string action) {
@@ -151,7 +182,370 @@ namespace SolidFlow {
       }
     }
 
-    static string Capture(IntPtr hwnd, bool includePng) {
+    static IntPtr ParseHwnd(string value) {
+      long parsed;
+      if (string.IsNullOrWhiteSpace(value) || !long.TryParse(value, out parsed) || parsed == 0) return IntPtr.Zero;
+      return new IntPtr(parsed);
+    }
+
+    static string HwndText(IntPtr hwnd) {
+      return hwnd.ToInt64().ToString();
+    }
+
+    static bool Belongs(uint windowPid, int procId, string appPath) {
+      if (procId > 0 && windowPid == (uint)procId) return true;
+      if (procId > 0) return false;
+      return SamePath(ProcessPath(windowPid), appPath);
+    }
+
+    static bool Related(IntPtr hwnd, int procId, string appPath) {
+      if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
+      uint pid;
+      GetWindowThreadProcessId(hwnd, out pid);
+      string image = ProcessPath(pid);
+      if (IsStudioProcess(image)) return false;
+      if (Belongs(pid, procId, appPath) || SamePath(image, appPath)) return true;
+      IntPtr owner = GetWindow(hwnd, GW_OWNER);
+      if (owner != IntPtr.Zero && owner != hwnd && Related(owner, procId, appPath)) return true;
+      IntPtr root = GetAncestor(hwnd, 3);
+      if (root != IntPtr.Zero && root != hwnd && root != owner) {
+        uint rootPid;
+        GetWindowThreadProcessId(root, out rootPid);
+        if (IsStudioProcess(ProcessPath(rootPid))) return false;
+        if (Belongs(rootPid, procId, appPath) || SamePath(ProcessPath(rootPid), appPath)) return true;
+      }
+      return false;
+    }
+
+    static bool SkipClass(IntPtr hwnd) {
+      StringBuilder buffer = new StringBuilder(256);
+      if (GetClassName(hwnd, buffer, buffer.Capacity) == 0) return false;
+      string name = buffer.ToString();
+      return name == "tooltips_class32" || name == "SysShadow" || name == "#32768" || name == "IME" || name == "MSCTFIME UI";
+    }
+
+    static List<IntPtr> popupHits;
+
+    static string ListPopups(int procId, string appPath) {
+      IntPtr main = Find(procId, appPath, 0, 0, 0, 0);
+      popupHits = new List<IntPtr>();
+      held = delegate(IntPtr hWnd, IntPtr lParam) {
+        try {
+          if (IsPopup(hWnd, main, procId, appPath)) popupHits.Add(hWnd);
+        } catch { }
+        return true;
+      };
+      try { EnumWindows(held, IntPtr.Zero); }
+      finally { held = null; }
+      StringBuilder json = new StringBuilder();
+      json.Append("{\"ok\":true,\"windows\":[");
+      bool first = true;
+      foreach (IntPtr hwnd in popupHits) {
+        if (!first) json.Append(',');
+        first = false;
+        json.Append("{\"hwnd\":\"" + HwndText(hwnd) + "\",\"title\":" + JsonString(WindowTitle(hwnd)) + "}");
+      }
+      popupHits = null;
+      json.Append("]}");
+      return json.ToString();
+    }
+
+    static bool IsPopup(IntPtr hwnd, IntPtr main, int procId, string appPath) {
+      if (hwnd == IntPtr.Zero || hwnd == main) return false;
+      if (!IsWindowVisible(hwnd) || Cloaked(hwnd) || SkipClass(hwnd)) return false;
+      if (GetWindowTextLength(hwnd) == 0) return false;
+      if (!Related(hwnd, procId, appPath)) return false;
+      RECT win;
+      if (!WindowRect(hwnd, out win)) return false;
+      if (win.Right - win.Left < 80 || win.Bottom - win.Top < 80) return false;
+      return true;
+    }
+
+    static AutomationElement FromHwnd(IntPtr hwnd) {
+      return AutomationElement.FromHandle(hwnd);
+    }
+
+    static string ClassNameOf(IntPtr hwnd) {
+      if (hwnd == IntPtr.Zero) return "";
+      StringBuilder buffer = new StringBuilder(256);
+      if (GetClassName(hwnd, buffer, buffer.Capacity) == 0) return "";
+      return buffer.ToString();
+    }
+
+    static IntPtr HwndOf(AutomationElement el) {
+      if (el == null) return IntPtr.Zero;
+      int raw = el.Current.NativeWindowHandle;
+      if (raw == 0) return IntPtr.Zero;
+      return new IntPtr(raw);
+    }
+
+    static bool IsFilenameId(string id) {
+      return id == "1152" || id == "1148" || id == "FileNameControlHost" || id == "Filename" || id == "FileName";
+    }
+
+    static bool IsFilenameLabel(string name) {
+      string trimmed = (name ?? "").Trim().TrimEnd(':').Trim();
+      return trimmed.Equals("Folder", StringComparison.OrdinalIgnoreCase)
+        || trimmed.Equals("File name", StringComparison.OrdinalIgnoreCase);
+    }
+
+    static bool SameName(AutomationElement el, string name) {
+      string current = (el.Current.Name ?? "").Trim();
+      string auto = el.Current.AutomationId ?? "";
+      if (string.Equals(current, name, StringComparison.OrdinalIgnoreCase)) return true;
+      return string.Equals(auto, name, StringComparison.OrdinalIgnoreCase);
+    }
+
+    static AutomationElement FilenameEdit(AutomationElement root) {
+      if (root == null) return null;
+      string[] ids = new string[] { "1152", "1148", "FileNameControlHost", "Filename", "FileName" };
+      for (int i = 0; i < ids.Length; i++) {
+        AutomationElement found = root.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.AutomationIdProperty, ids[i]));
+        if (found != null) return found;
+      }
+      return null;
+    }
+
+    static string FieldLabel(AutomationElement root) {
+      AutomationElement label = root.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.AutomationIdProperty, "1090"));
+      string name = label == null ? "" : (label.Current.Name ?? "").Trim();
+      if (name.Length > 0) return name;
+      return "Folder:";
+    }
+
+    static AutomationElement FindNamed(AutomationElement root, string name) {
+      if (root == null || string.IsNullOrWhiteSpace(name)) return null;
+      AutomationElement editable = null;
+      AutomationElement button = null;
+      AutomationElement other = null;
+      AutomationElementCollection all = root.FindAll(TreeScope.Descendants, Condition.TrueCondition);
+      foreach (AutomationElement el in all) {
+        if (!SameName(el, name)) continue;
+        string cls = ClassNameOf(HwndOf(el));
+        string id = el.Current.AutomationId ?? "";
+        if (cls == "Edit" || cls.StartsWith("RichEdit") || IsFilenameId(id)) editable = el;
+        else if (cls == "Button") button = el;
+        else if (other == null && cls != "Static") other = el;
+      }
+      if (editable != null) return editable;
+      if (IsFilenameLabel(name)) {
+        AutomationElement field = FilenameEdit(root);
+        if (field != null) return field;
+      }
+      if (button != null) return button;
+      return other;
+    }
+
+    static bool ClickHwnd(IntPtr hwnd) {
+      RECT rect;
+      if (hwnd == IntPtr.Zero || !GetClientRect(hwnd, out rect)) return false;
+      int x = Math.Max(1, (rect.Right - rect.Left) / 2);
+      int y = Math.Max(1, (rect.Bottom - rect.Top) / 2);
+      IntPtr point = new IntPtr((y << 16) | (x & 0xFFFF));
+      SendMessagePtr(hwnd, 0x0201, new IntPtr(1), point);
+      SendMessagePtr(hwnd, 0x0202, IntPtr.Zero, point);
+      return true;
+    }
+
+    static bool Act(AutomationElement el) {
+      object pattern;
+      if (el.TryGetCurrentPattern(InvokePattern.Pattern, out pattern)) {
+        ((InvokePattern)pattern).Invoke();
+        return true;
+      }
+      IntPtr hwnd = HwndOf(el);
+      string cls = ClassNameOf(hwnd);
+      if (cls == "Button") {
+        SendMessagePtr(hwnd, 0x00F5, IntPtr.Zero, IntPtr.Zero);
+        return true;
+      }
+      if (cls == "Edit" || cls.StartsWith("RichEdit") || IsFilenameId(el.Current.AutomationId ?? "")) {
+        return ClickHwnd(hwnd);
+      }
+      if (el.TryGetCurrentPattern(TogglePattern.Pattern, out pattern)) {
+        ((TogglePattern)pattern).Toggle();
+        return true;
+      }
+      if (el.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pattern)) {
+        ((SelectionItemPattern)pattern).Select();
+        return true;
+      }
+      if (el.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out pattern)) {
+        ExpandCollapsePattern expand = (ExpandCollapsePattern)pattern;
+        if (expand.Current.ExpandCollapseState == ExpandCollapseState.Collapsed) expand.Expand();
+        else expand.Collapse();
+        return true;
+      }
+      return false;
+    }
+
+    static string InvokeNamed(IntPtr hwnd, string name) {
+      try {
+        AutomationElement el = FindNamed(FromHwnd(hwnd), name);
+        if (el == null || !Act(el)) return "{\"ok\":false,\"error\":" + JsonString(name + " is not in " + WindowTitle(hwnd)) + "}";
+        return "{\"ok\":true}";
+      } catch (Exception ex) {
+        return "{\"ok\":false,\"error\":" + JsonString(ex.Message) + "}";
+      }
+    }
+
+    static string VisibleNamed(IntPtr hwnd, string name) {
+      try {
+        if (string.Equals(WindowTitle(hwnd), name, StringComparison.OrdinalIgnoreCase)) return "{\"ok\":true,\"visible\":true}";
+        AutomationElement el = FindNamed(FromHwnd(hwnd), name);
+        if (el == null) return "{\"ok\":true,\"visible\":false}";
+        bool visible = !el.Current.IsOffscreen;
+        return "{\"ok\":true,\"visible\":" + (visible ? "true" : "false") + "}";
+      } catch (Exception ex) {
+        return "{\"ok\":false,\"error\":" + JsonString(ex.Message) + "}";
+      }
+    }
+
+    static bool WriteText(AutomationElement el, string text) {
+      IntPtr hwnd = HwndOf(el);
+      string cls = ClassNameOf(hwnd);
+      if (cls == "Edit" || cls.StartsWith("RichEdit")) {
+        SendMessageText(hwnd, 0x000C, IntPtr.Zero, text ?? "");
+        return true;
+      }
+      object pattern = null;
+      if (!el.TryGetCurrentPattern(ValuePattern.Pattern, out pattern)) {
+        AutomationElement inner = el.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+        if (inner != null) inner.TryGetCurrentPattern(ValuePattern.Pattern, out pattern);
+      }
+      ValuePattern value = pattern as ValuePattern;
+      if (value == null) return false;
+      value.SetValue(text ?? "");
+      return true;
+    }
+
+    static string ReadText(AutomationElement el) {
+      IntPtr hwnd = HwndOf(el);
+      string cls = ClassNameOf(hwnd);
+      if (cls == "Edit" || cls.StartsWith("RichEdit")) {
+        StringBuilder buffer = new StringBuilder(2048);
+        SendMessageBuffer(hwnd, 0x000D, new IntPtr(buffer.Capacity), buffer);
+        return buffer.ToString();
+      }
+      object pattern = null;
+      if (el.TryGetCurrentPattern(ValuePattern.Pattern, out pattern)) {
+        ValuePattern value = pattern as ValuePattern;
+        if (value != null) return value.Current.Value ?? "";
+      }
+      return "";
+    }
+
+    static string SetNamedValue(IntPtr hwnd, string name, string text) {
+      try {
+        AutomationElement root = FromHwnd(hwnd);
+        AutomationElement el = string.IsNullOrWhiteSpace(name) ? FilenameEdit(root) : FindNamed(root, name);
+        if (el == null) return "{\"ok\":false,\"error\":" + JsonString((name.Length == 0 ? "The text field" : name) + " is not in " + WindowTitle(hwnd)) + "}";
+        if (!WriteText(el, text)) return "{\"ok\":false,\"error\":" + JsonString(name + " cannot be edited") + "}";
+        return "{\"ok\":true}";
+      } catch (Exception ex) {
+        return "{\"ok\":false,\"error\":" + JsonString(ex.Message) + "}";
+      }
+    }
+
+    static string ReadNamed(IntPtr hwnd, string name) {
+      try {
+        AutomationElement root = FromHwnd(hwnd);
+        AutomationElement el = string.IsNullOrWhiteSpace(name) ? FilenameEdit(root) : FindNamed(root, name);
+        if (el == null) return "{\"ok\":false,\"error\":" + JsonString((name.Length == 0 ? "The text field" : name) + " is not in " + WindowTitle(hwnd)) + "}";
+        return "{\"ok\":true,\"text\":" + JsonString(ReadText(el)) + "}";
+      } catch (Exception ex) {
+        return "{\"ok\":false,\"error\":" + JsonString(ex.Message) + "}";
+      }
+    }
+
+    static void AppendControl(StringBuilder json, ref bool first, ref int count, string label, string kind, int x, int y, int w, int h) {
+      if (count >= 80 || label.Length == 0 || w < 4 || h < 4) return;
+      if (!first) json.Append(',');
+      first = false;
+      count++;
+      json.Append("{\"name\":" + JsonString(label) + ",\"kind\":\"" + kind + "\",\"bounds\":{\"x\":" + x + ",\"y\":" + y + ",\"width\":" + w + ",\"height\":" + h + "}}");
+    }
+
+    static bool TryBounds(AutomationElement el, int originX, int originY, int captionH, out int x, out int y, out int w, out int h) {
+      x = y = w = h = 0;
+      if (el.Current.IsOffscreen) return false;
+      System.Windows.Rect rect = el.Current.BoundingRectangle;
+      if (rect.IsEmpty || rect.Width < 4 || rect.Height < 4) return false;
+      x = (int)Math.Round(rect.X - originX);
+      y = (int)Math.Round(rect.Y - originY);
+      w = (int)Math.Round(rect.Width);
+      h = (int)Math.Round(rect.Height);
+      if (captionH > 0 && y + h / 2 < captionH) return false;
+      return true;
+    }
+
+    static void AppendDialogFields(AutomationElement root, StringBuilder json, ref bool first, ref int count, int originX, int originY, int captionH) {
+      AutomationElement edit = FilenameEdit(root);
+      int x, y, w, h;
+      if (edit != null && TryBounds(edit, originX, originY, captionH, out x, out y, out w, out h)) {
+        AppendControl(json, ref first, ref count, FieldLabel(root), "edit", x, y, w, h);
+      }
+      AutomationElementCollection panes = root.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Pane));
+      foreach (AutomationElement el in panes) {
+        if (ClassNameOf(HwndOf(el)) != "Button") continue;
+        string label = (el.Current.Name ?? "").Trim();
+        if (!TryBounds(el, originX, originY, captionH, out x, out y, out w, out h)) continue;
+        AppendControl(json, ref first, ref count, label, "button", x, y, w, h);
+      }
+    }
+
+    static string ControlJson(IntPtr hwnd, int originX, int originY, int captionH) {
+      try {
+        AutomationElement root = FromHwnd(hwnd);
+        ControlType[] types = new ControlType[] {
+          ControlType.Button, ControlType.SplitButton, ControlType.Edit, ControlType.ComboBox,
+          ControlType.CheckBox, ControlType.RadioButton, ControlType.Hyperlink, ControlType.TreeItem
+        };
+        StringBuilder json = new StringBuilder();
+        json.Append('[');
+        bool first = true;
+        int count = 0;
+        int trees = 0;
+        AppendDialogFields(root, json, ref first, ref count, originX, originY, captionH);
+        for (int t = 0; t < types.Length && count < 80; t++) {
+          AutomationElementCollection found = root.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, types[t]));
+          foreach (AutomationElement el in found) {
+            if (count >= 80) break;
+            string label = (el.Current.Name ?? "").Trim();
+            if (label.Length == 0) continue;
+            if (el.Current.IsOffscreen) continue;
+            System.Windows.Rect rect = el.Current.BoundingRectangle;
+            if (rect.IsEmpty || rect.Width < 4 || rect.Height < 4) continue;
+            int x = (int)Math.Round(rect.X - originX);
+            int y = (int)Math.Round(rect.Y - originY);
+            int w = (int)Math.Round(rect.Width);
+            int h = (int)Math.Round(rect.Height);
+            if (captionH > 0 && y + h / 2 < captionH) continue;
+            string kind = "control";
+            ControlType type = types[t];
+            if (type == ControlType.Button || type == ControlType.SplitButton) kind = "button";
+            else if (type == ControlType.Edit) kind = "edit";
+            else if (type == ControlType.ComboBox) kind = "combo";
+            else if (type == ControlType.TreeItem) {
+              if (trees >= 40) continue;
+              trees++;
+              kind = "tree";
+            } else if (type == ControlType.CheckBox || type == ControlType.RadioButton) kind = "check";
+            else if (type == ControlType.Hyperlink) kind = "link";
+            if (!first) json.Append(',');
+            first = false;
+            count++;
+            json.Append("{\"name\":" + JsonString(label) + ",\"kind\":\"" + kind + "\",\"bounds\":{\"x\":" + x + ",\"y\":" + y + ",\"width\":" + w + ",\"height\":" + h + "}}");
+          }
+        }
+        json.Append(']');
+        return json.ToString();
+      } catch {
+        return "[]";
+      }
+    }
+
+    static string Capture(IntPtr hwnd, bool includePng, bool popup) {
       bool iconic = IsIconic(hwnd);
       bool showRestore = iconic || IsZoomed(hwnd);
       RECT win;
@@ -211,7 +605,7 @@ namespace SolidFlow {
         Bitmap image = null;
         try {
           image = iconic ? null : Grab(hwnd, winW, winH, cropX, cropY, imgW, imgH, cy);
-          bool blank = image == null || TitleBlank(image, cy);
+          bool blank = image == null || (!popup && TitleBlank(image, cy));
           if (blank) {
             if (image != null) image.Dispose();
             image = new Bitmap(imgW, imgH, PixelFormat.Format32bppArgb);
@@ -233,7 +627,10 @@ namespace SolidFlow {
       }
 
       int buttonWidth = Math.Max(0, imgW - bx);
+      string controls = popup ? ControlJson(hwnd, ext.Left, ext.Top, cy) : "[]";
       return "{\"ok\":true,\"title\":" + JsonString(title)
+        + ",\"popup\":" + (popup ? "true" : "false")
+        + ",\"controls\":" + controls
         + ",\"maximized\":" + (showRestore ? "true" : "false")
         + ",\"width\":" + imgW
         + ",\"height\":" + imgH
@@ -608,7 +1005,7 @@ namespace SolidFlow {
 }
 '@
 
-Add-Type -TypeDefinition $csharp -ReferencedAssemblies System.Drawing
+Add-Type -TypeDefinition $csharp -ReferencedAssemblies System.Drawing, UIAutomationClient, UIAutomationTypes, WindowsBase
 [SolidFlow.NativeFrame]::Init()
 
 function Convert-ToInt($value) {
@@ -632,7 +1029,10 @@ while ($true) {
       (Convert-ToInt $req.hintH),
       (Convert-ToInt $req.cssW),
       (Convert-ToInt $req.cssH),
-      [string]$req.action
+      [string]$req.action,
+      [string]$req.hwnd,
+      [string]$req.name,
+      [string]$req.text
     )
   } catch {
     $message = $_.Exception.Message

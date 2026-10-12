@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { FlowError, type DeviceInfo, type DriverKind } from "../types.js";
 import type { AutomationDriver, DriverContext } from "./types.js";
+import { chooseNativePopup, listNativePopups, type NativePopup } from "./native-frame.js";
 import { localeInitScript } from "./locale-init.js";
 import os from "node:os";
 
@@ -13,6 +14,9 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
   protected ctx: DriverContext | null = null;
   private mainPage: Page | null = null;
   private readonly adoptedPages = new Set<Page>();
+  protected focusedNativeWindow: NativePopup | null = null;
+  private nativePopupBaseline = new Set<string>();
+  private readonly adoptedNativePopups = new Set<string>();
 
   abstract connect(ctx: DriverContext): Promise<void>;
 
@@ -28,6 +32,9 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
       this.page = null;
       this.mainPage = null;
       this.adoptedPages.clear();
+      this.focusedNativeWindow = null;
+      this.nativePopupBaseline.clear();
+      this.adoptedNativePopups.clear();
     }
   }
 
@@ -35,24 +42,82 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     if (!this.browser || !this.page) {
       throw new FlowError("Connect the app before waiting for a window.");
     }
-    const found = await this.waitForUnadoptedPage(timeoutMs, new Set(this.adoptedPages));
-    if (!found) {
-      throw new FlowError(
-        "No new WebView or browser window appeared in the connected app. A separate system browser or a native dialog is not part of this session."
-      );
+    const native = this.nativeApp();
+    const seenPages = new Set(this.adoptedPages);
+    const pending: Page[] = [];
+    const onPage = (page: Page) => pending.push(page);
+    const listening = new Set<BrowserContext>();
+    const attach = () => {
+      if (!this.browser) return;
+      for (const context of this.browser.contexts()) {
+        if (listening.has(context)) continue;
+        context.on("page", onPage);
+        listening.add(context);
+      }
+    };
+    attach();
+    const started = Date.now();
+    try {
+      while (Date.now() - started < timeoutMs) {
+        attach();
+        const page =
+          pending.find(item => !item.isClosed() && !seenPages.has(item)) ??
+          this.listOpenPages().find(item => !seenPages.has(item));
+        if (page) {
+          this.focusedNativeWindow = null;
+          this.page = page;
+          this.adoptedPages.add(page);
+          await page.bringToFront().catch(() => {});
+          const remaining = Math.max(1, timeoutMs - (Date.now() - started));
+          await page.waitForLoadState("domcontentloaded", { timeout: remaining }).catch(() => {});
+          return;
+        }
+        if (native && process.platform === "win32") {
+          const windows = await listNativePopups({ pid: native.pid, appPath: native.appPath }).catch(() => []);
+          const popup = chooseNativePopup(windows, this.nativePopupBaseline, this.adoptedNativePopups);
+          if (popup) {
+            this.focusedNativeWindow = popup;
+            this.adoptedNativePopups.add(popup.hwnd);
+            return;
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    } finally {
+      for (const context of listening) context.off("page", onPage);
     }
-    this.page = found;
-    this.adoptedPages.add(found);
-    await found.bringToFront().catch(() => {});
-    await found.waitForLoadState("domcontentloaded", { timeout: timeoutMs }).catch(() => {});
+    throw new FlowError(
+      "No new window appeared in the connected app. A folder picker or other window of that app counts. A separate system browser does not."
+    );
   }
 
   async switchToMain(): Promise<void> {
+    this.focusedNativeWindow = null;
     if (!this.mainPage || this.mainPage.isClosed()) {
       throw new FlowError("The original window is no longer open.");
     }
     this.page = this.mainPage;
     await this.mainPage.bringToFront().catch(() => {});
+  }
+
+  async releaseClosedNativeWindow(): Promise<void> {
+    const current = this.focusedNativeWindow;
+    if (!current) return;
+    const native = this.nativeApp();
+    if (!native) {
+      this.focusedNativeWindow = null;
+      return;
+    }
+    const open = await listNativePopups({ pid: native.pid, appPath: native.appPath }).catch(() => null);
+    if (!open) return;
+    if (!open.some(window => window.hwnd === current.hwnd)) this.focusedNativeWindow = null;
+  }
+
+  protected async rememberNativePopups(): Promise<void> {
+    const native = this.nativeApp();
+    if (!native || process.platform !== "win32") return;
+    const windows = await listNativePopups({ pid: native.pid, appPath: native.appPath }).catch(() => []);
+    this.nativePopupBaseline = new Set(windows.map(window => window.hwnd));
   }
 
   async clearState(): Promise<void> {
@@ -70,7 +135,7 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     };
   }
 
-  nativeApp(): { pid: number; appPath: string } | null {
+  nativeApp(): { pid: number; appPath: string; hwnd?: string } | null {
     return null;
   }
 
@@ -128,41 +193,6 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
       }
     }
     return pages;
-  }
-
-  private async waitForUnadoptedPage(timeoutMs: number, baseline: Set<Page>): Promise<Page | null> {
-    const already = this.listOpenPages().find(page => !baseline.has(page));
-    if (already) return already;
-
-    const pending: Page[] = [];
-    const onPage = (page: Page) => {
-      pending.push(page);
-    };
-    const listening = new Set<BrowserContext>();
-    const attach = () => {
-      if (!this.browser) return;
-      for (const context of this.browser.contexts()) {
-        if (listening.has(context)) continue;
-        context.on("page", onPage);
-        listening.add(context);
-      }
-    };
-
-    attach();
-    const started = Date.now();
-    try {
-      while (Date.now() - started < timeoutMs) {
-        attach();
-        const popped = pending.find(page => !page.isClosed() && !baseline.has(page));
-        if (popped) return popped;
-        const scanned = this.listOpenPages().find(page => !baseline.has(page));
-        if (scanned) return scanned;
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      return null;
-    } finally {
-      for (const context of listening) context.off("page", onPage);
-    }
   }
 
   protected async waitForCdpEndpoint(

@@ -5,12 +5,17 @@ import { PNG } from "pngjs";
 import {
   captionActionFor,
   captureNativeFrame,
+  chooseNativePopup,
   clipRect,
   compositePageIntoFrame,
   headerNodes,
   hitHeader,
   imageToPage,
+  invokeNativeControl,
   lastNativeFrameError,
+  listNativePopups,
+  readNativeText,
+  setNativeText,
   nativeControlVisible,
   performCaptionAction,
   stopNativeFrameHost,
@@ -23,7 +28,9 @@ const sample: FrameLayout = {
   width: 1000,
   height: 700,
   client: { x: 8, y: 40, width: 984, height: 652 },
-  buttons: { x: 850, y: 0, width: 150, height: 40 }
+  buttons: { x: 850, y: 0, width: 150, height: 40 },
+  popup: false,
+  controls: []
 };
 
 describe("native window header", () => {
@@ -91,6 +98,18 @@ describe("native window header", () => {
     expect(pixel(out, 1, 2)).toEqual([12, 90, 180, 255]);
   });
 
+  it("ignores windows that were already open and follows a new folder window", () => {
+    const baseline = new Set(["main"]);
+    const adopted = new Set<string>();
+    const windows = [
+      { hwnd: "main", title: "CIM Document Exporter" },
+      { hwnd: "folder", title: "Select output folder" }
+    ];
+    expect(chooseNativePopup(windows, baseline, adopted)?.title).toBe("Select output folder");
+    adopted.add("folder");
+    expect(chooseNativePopup(windows, baseline, adopted)).toBeNull();
+  });
+
   it("turns a double tap on the title into restore or maximize", () => {
     expect(captionActionFor("tapOn", "window:close")).toBe("close");
     expect(captionActionFor("tapOn", "window:title")).toBe("title");
@@ -133,6 +152,58 @@ describe("native window header", () => {
       if (probe.exitCode == null && !probe.killed) probe.kill();
     }
   }, 40_000);
+
+  it("detects a folder picker owned by the app and can cancel it", async () => {
+    if (process.platform !== "win32") return;
+    const root = process.env.SystemRoot || "C:\\Windows";
+    const exe = join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const probe = spawn(exe, ["-NoProfile", "-Sta", "-WindowStyle", "Hidden", "-Command", folderScript()], {
+      windowsHide: false,
+      stdio: "ignore"
+    });
+    try {
+      const popup = await waitForPopupWindow(probe.pid ?? 0, exe, "Select output folder");
+      expect(popup, lastNativeFrameError()).toBeTruthy();
+      if (!popup) return;
+      expect(popup.title).toContain("Select output folder");
+      const frame = await captureNativeFrame({ pid: probe.pid ?? 0, appPath: exe, hwnd: popup.hwnd });
+      expect(frame?.popup).toBe(true);
+      expect(frame?.controls.some(control => control.label === "Cancel")).toBe(true);
+      await invokeNativeControl({ pid: probe.pid ?? 0, appPath: exe, hwnd: popup.hwnd }, "Cancel");
+      const gone = await waitUntil(async () => {
+        const windows = await listNativePopups({ pid: probe.pid ?? 0, appPath: exe });
+        return !windows.some(window => window.hwnd === popup.hwnd);
+      }, 5_000);
+      expect(gone).toBe(true);
+    } finally {
+      if (probe.exitCode == null && !probe.killed) probe.kill();
+    }
+  }, 40_000);
+
+  it("types into the folder name box instead of the Folder label", async () => {
+    if (process.platform !== "win32") return;
+    const root = process.env.SystemRoot || "C:\\Windows";
+    const exe = join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const probe = spawn(exe, ["-NoProfile", "-Sta", "-WindowStyle", "Hidden", "-Command", pickerScript()], {
+      windowsHide: false,
+      stdio: "ignore"
+    });
+    try {
+      const popup = await waitForPopupWindow(probe.pid ?? 0, exe, "Select output folder");
+      expect(popup, lastNativeFrameError()).toBeTruthy();
+      if (!popup) return;
+      const frame = await captureNativeFrame({ pid: probe.pid ?? 0, appPath: exe, hwnd: popup.hwnd });
+      const field = frame?.controls.find(control => control.label === "Folder:" && control.tag === "edit");
+      expect(field?.bounds.width).toBeGreaterThan(200);
+      const app = { pid: probe.pid ?? 0, appPath: exe, hwnd: popup.hwnd };
+      await invokeNativeControl(app, "Folder:");
+      await setNativeText(app, "Folder:", "C:\\Temp\\solidflow-folder-box");
+      expect(await readNativeText(app, "Folder:")).toBe("C:\\Temp\\solidflow-folder-box");
+      await invokeNativeControl(app, "Cancel");
+    } finally {
+      if (probe.exitCode == null && !probe.killed) probe.kill();
+    }
+  }, 40_000);
 });
 
 function exitedWithin(child: ReturnType<typeof spawn>, ms: number): Promise<boolean> {
@@ -161,6 +232,112 @@ function probeScript(): string {
     "while ($form.Visible -and [DateTime]::UtcNow -lt $deadline) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 30 }",
     "$form.Dispose()"
   ].join("; ");
+}
+
+function pickerScript(): string {
+  return [
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "$source = @'",
+    "using System;",
+    "using System.Runtime.InteropServices;",
+    "[ComImport, Guid(\"DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7\")]",
+    "class FileOpenDialogRCW {}",
+    "[ComImport, Guid(\"d57c7288-d4ad-4768-be02-9d969532d960\"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]",
+    "interface IFileDialogProbe {",
+    "  [PreserveSig] int Show(IntPtr parent);",
+    "  void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);",
+    "  void SetFileTypeIndex(uint iFileType);",
+    "  void GetFileTypeIndex(out uint piFileType);",
+    "  void Advise(IntPtr pfde, out uint pdwCookie);",
+    "  void Unadvise(uint dwCookie);",
+    "  void SetOptions(uint fos);",
+    "  void GetOptions(out uint fos);",
+    "  void SetDefaultFolder(IntPtr psi);",
+    "  void SetFolder(IntPtr psi);",
+    "  void GetFolder(out IntPtr ppsi);",
+    "  void GetCurrentSelection(out IntPtr ppsi);",
+    "  void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);",
+    "  void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);",
+    "  void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);",
+    "  void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);",
+    "  void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);",
+    "  void GetResult(out IntPtr ppsi);",
+    "  void AddPlace(IntPtr psi, uint fdap);",
+    "  void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);",
+    "  void Close(int hr);",
+    "  void SetClientGuid(ref Guid guid);",
+    "  void ClearClientData();",
+    "  void SetFilter(IntPtr pFilter);",
+    "}",
+    "public static class FolderProbe {",
+    "  public static void Show(IntPtr owner) {",
+    "    IFileDialogProbe dialog = (IFileDialogProbe)new FileOpenDialogRCW();",
+    "    dialog.SetOptions(0x20 | 0x40);",
+    "    dialog.SetTitle(\"Select output folder\");",
+    "    dialog.SetOkButtonLabel(\"Select Folder\");",
+    "    dialog.Show(owner);",
+    "  }",
+    "}",
+    "'@",
+    "Add-Type -TypeDefinition $source -ReferencedAssemblies System.Windows.Forms",
+    "$form = New-Object System.Windows.Forms.Form",
+    "$form.Text = 'Target App Probe'",
+    "$form.StartPosition = 'Manual'",
+    "$form.Location = New-Object System.Drawing.Point(40, 40)",
+    "$form.ClientSize = New-Object System.Drawing.Size(480, 240)",
+    "$form.Show()",
+    "$timer = New-Object System.Windows.Forms.Timer",
+    "$timer.Interval = 400",
+    "$script:opened = $false",
+    "$timer.Add_Tick({ if ($script:opened) { return }; $script:opened = $true; $timer.Stop(); [FolderProbe]::Show($form.Handle) })",
+    "$timer.Start()",
+    "$deadline = [DateTime]::UtcNow.AddMinutes(2)",
+    "while ($form.Visible -and [DateTime]::UtcNow -lt $deadline) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 30 }",
+    "$form.Dispose()"
+  ].join("\n");
+}
+
+function folderScript(): string {
+  return [
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -AssemblyName System.Drawing",
+    "$form = New-Object System.Windows.Forms.Form",
+    "$form.Text = 'Target App Probe'",
+    "$form.StartPosition = 'Manual'",
+    "$form.Location = New-Object System.Drawing.Point(80, 80)",
+    "$form.ClientSize = New-Object System.Drawing.Size(640, 400)",
+    "$form.Show()",
+    "$dialog = New-Object System.Windows.Forms.OpenFileDialog",
+    "$dialog.Title = 'Select output folder'",
+    "$timer = New-Object System.Windows.Forms.Timer",
+    "$timer.Interval = 400",
+    "$script:opened = $false",
+    "$timer.Add_Tick({ if ($script:opened) { return }; $script:opened = $true; $timer.Stop(); [void]$dialog.ShowDialog($form) })",
+    "$timer.Start()",
+    "$deadline = [DateTime]::UtcNow.AddMinutes(2)",
+    "while ($form.Visible -and [DateTime]::UtcNow -lt $deadline) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 30 }",
+    "$form.Dispose()"
+  ].join("; ");
+}
+
+async function waitForPopupWindow(pid: number, appPath: string, title: string) {
+  const started = Date.now();
+  while (Date.now() - started < 15_000) {
+    const windows = await listNativePopups({ pid, appPath });
+    const found = windows.find(window => window.title.includes(title));
+    if (found) return found;
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  return null;
+}
+
+async function waitUntil(check: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await check()) return true;
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  return false;
 }
 
 async function waitForFrame(pid: number, appPath: string) {

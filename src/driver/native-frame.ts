@@ -27,11 +27,16 @@ export type FrameLayout = {
   height: number;
   client: Rect;
   buttons: Rect;
+  /** This image is a native dialog, such as a folder picker, rather than the app page. */
+  popup: boolean;
+  controls: FrameNode[];
 };
 
 export type NativeFrame = FrameLayout & { png: Buffer };
 
-export type NativeApp = { pid: number; appPath: string };
+export type NativeApp = { pid: number; appPath: string; hwnd?: string };
+
+export type NativePopup = { hwnd: string; title: string };
 
 export type PixelHint = { width: number; height: number; cssWidth: number; cssHeight: number };
 
@@ -92,9 +97,21 @@ export function headerNodes(layout: FrameLayout): FrameNode[] {
 }
 
 export function hitHeader(layout: FrameLayout, x: number, y: number): FrameNode | null {
-  const hits = headerNodes(layout).filter(node => contains(node.bounds, x, y));
+  return hitNode(headerNodes(layout), x, y);
+}
+
+export function hitNode(nodes: FrameNode[], x: number, y: number): FrameNode | null {
+  const hits = nodes.filter(node => contains(node.bounds, x, y));
   hits.sort((a, b) => a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height);
   return hits[0] ?? null;
+}
+
+export function chooseNativePopup(
+  windows: NativePopup[],
+  baseline: ReadonlySet<string>,
+  adopted: ReadonlySet<string>
+): NativePopup | null {
+  return windows.find(window => window.hwnd && !baseline.has(window.hwnd) && !adopted.has(window.hwnd)) ?? null;
 }
 
 export function imageToPage(
@@ -129,6 +146,12 @@ export function compositePageIntoFrame(framePng: Buffer, pagePng: Buffer, client
   const page = PNG.sync.read(pagePng);
   revealTitlePixels(frame);
   blit(frame, page, client);
+  return PNG.sync.write(frame);
+}
+
+export function presentFrame(framePng: Buffer): Buffer {
+  const frame = PNG.sync.read(framePng);
+  revealTitlePixels(frame);
   return PNG.sync.write(frame);
 }
 
@@ -193,6 +216,52 @@ export async function nativeControlVisible(
     return nodes.some(node => node.selector === "window:maximize");
   }
   return nodes.some(node => node.selector === `window:${control}`);
+}
+
+export async function listNativePopups(app: NativeApp): Promise<NativePopup[]> {
+  if (process.platform !== "win32") return [];
+  const response = await helperRequest({ op: "windows", procId: app.pid, appPath: app.appPath });
+  if (!response?.ok || !Array.isArray(response.windows)) return [];
+  return response.windows
+    .filter(window => typeof window.hwnd === "string" && window.hwnd && typeof window.title === "string")
+    .map(window => ({ hwnd: window.hwnd as string, title: window.title as string }));
+}
+
+export async function invokeNativeControl(app: NativeApp, name: string): Promise<void> {
+  const response = await nativeUi(app, "invoke", name);
+  if (!response?.ok) throw new FlowError(response?.error || `${name} is not in the window.`);
+}
+
+export async function nativeTextVisible(app: NativeApp, name: string): Promise<boolean> {
+  const response = await nativeUi(app, "visible", name);
+  if (!response?.ok) {
+    if (response?.error === "window not found") return false;
+    throw new FlowError(response?.error || "Could not check the window.");
+  }
+  return response.visible === true;
+}
+
+export async function setNativeText(app: NativeApp, name: string, text: string): Promise<void> {
+  const response = await nativeUi(app, "value", name, text);
+  if (!response?.ok) throw new FlowError(response?.error || "Could not type into the window.");
+}
+
+export async function readNativeText(app: NativeApp, name: string): Promise<string> {
+  const response = await nativeUi(app, "read", name);
+  if (!response?.ok) throw new FlowError(response?.error || "Could not read the window.");
+  return response.text ?? "";
+}
+
+async function nativeUi(app: NativeApp, op: string, name: string, text = ""): Promise<HelperResponse | null> {
+  if (process.platform !== "win32") {
+    throw new FlowError("Native windows are available on the connected Windows app.");
+  }
+  if (!app.hwnd) throw new FlowError("The folder window is no longer open.");
+  try {
+    return await helperRequest({ op, ...requestFields(app), name, text });
+  } catch (err) {
+    throw new FlowError(err instanceof Error ? err.message : "Could not use the window.");
+  }
 }
 
 export async function performCaptionAction(
@@ -285,6 +354,11 @@ type HelperResponse = {
   client?: Rect;
   buttons?: Rect;
   pngPath?: string;
+  popup?: boolean;
+  visible?: boolean;
+  text?: string;
+  windows?: { hwnd?: string; title?: string }[];
+  controls?: { name?: string; kind?: string; bounds?: Rect }[];
 };
 
 function requestFields(app: NativeApp, hint?: PixelHint): Record<string, number | string> {
@@ -294,7 +368,8 @@ function requestFields(app: NativeApp, hint?: PixelHint): Record<string, number 
     hintW: hint?.width ?? 0,
     hintH: hint?.height ?? 0,
     cssW: hint?.cssWidth ?? 0,
-    cssH: hint?.cssHeight ?? 0
+    cssH: hint?.cssHeight ?? 0,
+    ...(app.hwnd ? { hwnd: app.hwnd } : {})
   };
 }
 
@@ -321,8 +396,22 @@ function layoutFrom(response: HelperResponse): FrameLayout | null {
     width,
     height,
     client: fitted,
-    buttons
+    buttons,
+    popup: response.popup === true,
+    controls: controlsFrom(response.controls)
   };
+}
+
+function controlsFrom(value: HelperResponse["controls"]): FrameNode[] {
+  if (!Array.isArray(value)) return [];
+  const nodes: FrameNode[] = [];
+  for (const item of value) {
+    const bounds = finiteRect(item?.bounds);
+    const name = item?.name?.trim() ?? "";
+    if (!bounds || !name || bounds.width < 4 || bounds.height < 4) continue;
+    nodes.push({ tag: item?.kind || "control", selector: name, label: name, bounds });
+  }
+  return nodes;
 }
 
 function finiteRect(value: Rect | undefined): Rect | null {

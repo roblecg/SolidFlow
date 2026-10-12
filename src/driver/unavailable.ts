@@ -39,7 +39,9 @@ export class UnavailableDriver implements AutomationDriver {
     throw new DriverNotAvailableError(this.kind);
   }
 
-  nativeApp(): { pid: number; appPath: string } | null {
+  async releaseClosedNativeWindow(): Promise<void> {}
+
+  nativeApp(): { pid: number; appPath: string; hwnd?: string } | null {
     return null;
   }
 }
