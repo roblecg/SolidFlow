@@ -38,4 +38,8 @@ export class UnavailableDriver implements AutomationDriver {
   async switchToMain(): Promise<void> {
     throw new DriverNotAvailableError(this.kind);
   }
+
+  nativeApp(): { pid: number; appPath: string } | null {
+    return null;
+  }
 }

@@ -111,6 +111,7 @@
         if (!hit.selector) { start(); return; }
         void window.SolidFlowMenu.open(menu, clientX, clientY, {
           selector: hit.selector,
+          label: hit.label,
           onInsert: yaml => {
             channel.postMessage({ type: "insert", line: yaml });
             menu.hidden = true;

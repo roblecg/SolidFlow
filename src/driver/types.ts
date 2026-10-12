@@ -22,6 +22,8 @@ export interface AutomationDriver {
   takeScreenshot(name: string): Promise<string>;
   waitForPopup(timeoutMs: number): Promise<void>;
   switchToMain(): Promise<void>;
+  /** Process of the app under test. Its window title bar is not the SolidFlow studio window. */
+  nativeApp(): { pid: number; appPath: string } | null;
 }
 
 export type LocatorQuery = string;

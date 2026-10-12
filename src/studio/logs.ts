@@ -92,6 +92,17 @@ export function clearTestRuns(): void {
   testRuns.length = 0;
 }
 
+function windowControlLabel(value: string): string | null {
+  const labels: Record<string, string> = {
+    "window:close": "Close",
+    "window:minimize": "Minimize",
+    "window:maximize": "Maximize",
+    "window:restore": "Restore",
+    "window:title": "the window title bar"
+  };
+  return labels[value] ?? null;
+}
+
 export function formatStepLabel(command: string): string {
   if (command === "launchApp") return "Launch app";
   if (command === "stopApp") return "Stop app";
@@ -143,6 +154,8 @@ export function formatStepLabel(command: string): string {
     return `Input text "${text}" into ${target}`;
   }
   if (value.startsWith("role:option/")) return `${verb} "${value.slice("role:option/".length)}"`;
+  const windowControl = windowControlLabel(value);
+  if (windowControl) return `${verb} ${windowControl}`;
   if (name === "tapOn" && /^[\w.-]+$/.test(value)) return `Tap on id: ${value}`;
   if (!value) return verb;
   return `${verb} "${value}"`;

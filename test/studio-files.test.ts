@@ -47,6 +47,8 @@ describe("studio files", () => {
     expect(formatStepLabel("waitForPopup")).toBe("Wait for the next window");
     expect(formatStepLabel("switchToMain")).toBe("Switch to the original window");
     expect(formatStepLabel('tapOn: "Sign in"')).toBe('Tap on "Sign in"');
+    expect(formatStepLabel('tapOn: "window:close"')).toBe("Tap on Close");
+    expect(formatStepLabel('doubleTapOn: "window:title"')).toBe("Double tap the window title bar");
     expect(formatStepLabel('tapOn: "login-region"')).toBe("Tap on id: login-region");
     expect(formatStepLabel('inputText: "login-tenantId|kddadev6"')).toBe(
       'Input text "kddadev6" into login-tenantId'

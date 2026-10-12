@@ -151,9 +151,12 @@ window.SolidFlowMenu = {
     menu.innerHTML = "";
     const hint = document.createElement("div");
     hint.className = "hint";
-    hint.textContent = options.selector || "No element selected";
+    hint.textContent = options.label || options.selector || "No element selected";
     menu.append(hint);
-    for (const name of QUICK) {
+    const quick = /^window:(close|minimize|maximize|restore|title)$/.test(options.selector || "")
+      ? ["tapOn", "doubleTapOn", "assertVisible"]
+      : QUICK;
+    for (const name of quick) {
       const command = commands.find(item => item.name === name);
       if (!command) continue;
       menu.append(

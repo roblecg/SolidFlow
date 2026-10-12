@@ -68,4 +68,10 @@ export class WebView2Driver extends PlaywrightBaseDriver {
     const base = super.getDeviceInfo();
     return { ...base, debugPort: this.debugPort, appPath: this.ctx?.appPath };
   }
+
+  nativeApp(): { pid: number; appPath: string } | null {
+    const appPath = this.ctx?.appPath;
+    if (!appPath) return null;
+    return { pid: this.child?.pid ?? 0, appPath };
+  }
 }

@@ -26,6 +26,14 @@ import { writeReports } from "../report/index.js";
 import { canonicalCommand, unavailableReason } from "./commands.js";
 import { createScriptState, evalFlowExpression } from "./script-env.js";
 import { desktopCommandNeedsPage, executeDesktopCommand } from "./desktop-commands.js";
+import {
+  captionActionFor,
+  nativeControlVisible,
+  pagePixelHint,
+  parseWindowControl,
+  performCaptionAction,
+  type CaptionAction
+} from "../driver/native-frame.js";
 
 const activeAppLocks = new Set<string>();
 
@@ -519,6 +527,11 @@ async function executeStepBody(
       } else {
         q = strVal(raw);
       }
+      const caption = captionActionFor(name, q);
+      if (caption) {
+        await actOnWindow(driver, caption);
+        return;
+      }
       const { locator, match } = await defaultLocatorResolver.resolve(page, q, index);
       state.lastLocator = match;
       await presentTarget(page, locator, ctx.paceMs);
@@ -608,6 +621,10 @@ async function executeStepBody(
     case "assertVisible": {
       const raw = parsed.kind === "kv" ? parsed.value : parsed.value;
       const q = isRecord(raw) ? strVal(raw.text ?? raw.id ?? "") : strVal(raw);
+      if (parseWindowControl(q)) {
+        await assertWindowControl(driver, q, true, name === "waitForVisible" ? 30_000 : 10_000);
+        return;
+      }
       const { locator, match } = await defaultLocatorResolver.resolve(page, q);
       state.lastLocator = match;
       await locator.waitFor({ state: "visible", timeout: name === "waitForVisible" ? 30_000 : 10_000 });
@@ -618,6 +635,10 @@ async function executeStepBody(
     case "assertNotVisible": {
       const raw = parsed.kind === "kv" ? parsed.value : parsed.value;
       const q = isRecord(raw) ? strVal(raw.text ?? raw.id ?? "") : strVal(raw);
+      if (parseWindowControl(q)) {
+        await assertWindowControl(driver, q, false, 30_000);
+        return;
+      }
       const { locator, match } = await defaultLocatorResolver.resolve(page, q);
       state.lastLocator = match;
       await locator.waitFor({ state: "hidden", timeout: 30_000 });
@@ -754,6 +775,56 @@ function formatStep(step: FlowStep): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
+}
+
+async function actOnWindow(driver: AutomationDriver, action: CaptionAction): Promise<void> {
+  const native = driver.nativeApp();
+  if (!native) {
+    throw new FlowError("Window title bar controls belong to the connected desktop app.");
+  }
+  let hint: Awaited<ReturnType<typeof pagePixelHint>>;
+  try {
+    hint = await pagePixelHint(driver.getPage());
+  } catch {
+    hint = undefined;
+  }
+  await performCaptionAction(native, action, hint);
+}
+
+async function assertWindowControl(
+  driver: AutomationDriver,
+  selector: string,
+  wantVisible: boolean,
+  timeoutMs: number
+): Promise<void> {
+  const native = driver.nativeApp();
+  if (!native) {
+    throw new FlowError("Window title bar controls belong to the connected desktop app.");
+  }
+  const started = Date.now();
+  let visible = false;
+  let saw = false;
+  let lastError = "";
+  for (;;) {
+    let hint: Awaited<ReturnType<typeof pagePixelHint>>;
+    try {
+      hint = await pagePixelHint(driver.getPage());
+    } catch {
+      hint = undefined;
+    }
+    try {
+      visible = await nativeControlVisible(native, selector, hint);
+      saw = true;
+      lastError = "";
+      if (visible === wantVisible) return;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+    if (Date.now() - started >= timeoutMs) break;
+    await delay(200);
+  }
+  if (!saw && lastError) throw new FlowError(lastError);
+  throw new FlowError(wantVisible ? `${selector} is not visible` : `${selector} is still visible`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

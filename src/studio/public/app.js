@@ -345,7 +345,7 @@ async function pickElement(nx, ny, clientX, clientY) {
     }
     selected = hit;
     showMenu(clientX, clientY, hit);
-    setStatus("Choose a command for " + hit.selector, "ok");
+    setStatus("Choose a command for " + (hit.label || hit.selector), "ok");
   } catch (err) {
     setStatus(err.message, "bad");
   } finally {
@@ -357,6 +357,7 @@ function showMenu(x, y, node) {
   selected = node;
   void window.SolidFlowMenu.open(menu, x, y, {
     selector: node.selector,
+    label: node.label,
     onInsert: yaml => {
       insertLine(yaml);
       hideMenu();

@@ -70,6 +70,10 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     };
   }
 
+  nativeApp(): { pid: number; appPath: string } | null {
+    return null;
+  }
+
   async takeScreenshot(name: string): Promise<string> {
     const page = this.getPage();
     const dir = this.ctx?.screenshotDir ?? join(process.cwd(), "test-results", "screenshots");
