@@ -15,6 +15,36 @@ describe("fixture flow", () => {
     const flow = parseFlowFile(smokePath);
     expect(flow.appId).toBe("fixture.demo");
     expect(flow.steps.length).toBeGreaterThan(3);
+    expect(flow.sections).toEqual([
+      expect.objectContaining({
+        number: 0,
+        name: "Unassigned",
+        stepIndices: expect.any(Array)
+      })
+    ]);
+    expect(flow.sections![0]!.stepIndices).toHaveLength(flow.steps.length);
+  });
+
+  it("parses named sections in order", () => {
+    const flow = parseFlowContent(`appId: fixture.demo
+---
+- section:
+    number: 2
+    name: Second
+    description: Later
+    steps:
+      - stopApp
+- section:
+    number: 1
+    name: First
+    description: Earlier
+    steps:
+      - launchApp
+`);
+    expect(flow.steps).toEqual(["stopApp", "launchApp"]);
+    expect(flow.sections!.map(s => s.number)).toEqual([1, 2]);
+    expect(flow.sections![0]).toMatchObject({ name: "First", stepIndices: [1] });
+    expect(flow.sections![1]).toMatchObject({ name: "Second", stepIndices: [0] });
   });
 
   it("uses appPath when appId is omitted", () => {

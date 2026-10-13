@@ -1,3 +1,6 @@
+import type { FlowSection, SectionStatus } from "../types.js";
+import { sectionStatusFromSteps } from "../flow/sections.js";
+
 export type AppLogEntry = {
   at: string;
   level: "info" | "warn" | "error";
@@ -8,9 +11,33 @@ export type TestStepLog = {
   index: number;
   command: string;
   label: string;
-  status: "running" | "passed" | "failed";
+  status: "running" | "passed" | "failed" | "skipped";
   durationMs?: number;
   error?: string;
+  sectionNumber?: number;
+  at?: string;
+};
+
+export type TestSectionDef = {
+  number: number;
+  name: string;
+  description: string;
+  stepIndices: number[];
+};
+
+export type TestSectionLog = {
+  number: number;
+  name: string;
+  description: string;
+  status: SectionStatus;
+  completedSteps: number;
+  totalSteps: number;
+  steps: TestStepLog[];
+  failure?: {
+    command: string;
+    error: string;
+    timestamp: string;
+  };
 };
 
 export type TestRunLog = {
@@ -21,6 +48,7 @@ export type TestRunLog = {
   finishedAt?: string;
   status: "running" | "passed" | "failed";
   steps: TestStepLog[];
+  sectionDefs: TestSectionDef[];
 };
 
 const appLogs: AppLogEntry[] = [];
@@ -45,14 +73,25 @@ export function clearAppLogs(): void {
   appLogs.length = 0;
 }
 
-export function beginTestRun(id: string, name: string, path: string): TestRunLog {
+export function beginTestRun(
+  id: string,
+  name: string,
+  path: string,
+  sections: FlowSection[] = []
+): TestRunLog {
   const run: TestRunLog = {
     id,
     name,
     path,
     startedAt: new Date().toISOString(),
     status: "running",
-    steps: []
+    steps: [],
+    sectionDefs: sections.map(section => ({
+      number: section.number,
+      name: section.name,
+      description: section.description,
+      stepIndices: [...section.stepIndices]
+    }))
   };
   testRuns.push(run);
   if (testRuns.length > MAX_RUNS) testRuns.splice(0, testRuns.length - MAX_RUNS);
@@ -72,9 +111,15 @@ export function noteTestStep(
     existing.durationMs = step.durationMs ?? existing.durationMs;
     existing.error = step.error;
     existing.label = label;
+    existing.sectionNumber = step.sectionNumber ?? existing.sectionNumber;
+    existing.at = step.at ?? existing.at ?? new Date().toISOString();
     return;
   }
-  run.steps.push({ ...step, label });
+  run.steps.push({
+    ...step,
+    label,
+    at: step.at ?? new Date().toISOString()
+  });
 }
 
 export function finishTestRun(runId: string, status: "passed" | "failed"): void {
@@ -84,8 +129,44 @@ export function finishTestRun(runId: string, status: "passed" | "failed"): void 
   run.finishedAt = new Date().toISOString();
 }
 
-export function listTestRuns(): TestRunLog[] {
-  return testRuns.slice().reverse();
+function liveSections(run: TestRunLog): TestSectionLog[] {
+  const runFinished = run.status !== "running";
+  return [...run.sectionDefs]
+    .sort((a, b) => a.number - b.number)
+    .map(section => {
+      const liveSteps = section.stepIndices
+        .map(index => run.steps.find(step => step.index === index))
+        .filter((step): step is TestStepLog => Boolean(step));
+      const totalSteps = section.stepIndices.length;
+      const status = sectionStatusFromSteps(liveSteps, totalSteps, runFinished);
+      const failedStep = liveSteps.find(step => step.status === "failed");
+      return {
+        number: section.number,
+        name: section.name,
+        description: section.description,
+        status,
+        completedSteps: liveSteps.filter(s => s.status === "passed" || s.status === "failed").length,
+        totalSteps,
+        steps: liveSteps,
+        failure: failedStep
+          ? {
+              command: failedStep.command,
+              error: failedStep.error ?? "failed",
+              timestamp: failedStep.at ?? run.finishedAt ?? new Date().toISOString()
+            }
+          : undefined
+      };
+    });
+}
+
+export function listTestRuns(): Array<TestRunLog & { sections: TestSectionLog[] }> {
+  return testRuns
+    .slice()
+    .reverse()
+    .map(run => ({
+      ...run,
+      sections: liveSections(run)
+    }));
 }
 
 export function clearTestRuns(): void {

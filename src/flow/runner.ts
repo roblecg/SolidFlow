@@ -14,6 +14,12 @@ import type {
 import { FlowError } from "../types.js";
 import { parseStep } from "./steps.js";
 import { parseFlowFile } from "./parser.js";
+import {
+  buildSectionReports,
+  isSectionStep,
+  normalizeFlowSections,
+  sectionForIndex
+} from "./sections.js";
 import { createDriver, inferDriver } from "../driver/registry.js";
 import { defaultLocatorResolver } from "../driver/locator.js";
 import type { AutomationDriver } from "../driver/types.js";
@@ -65,6 +71,7 @@ export type RunnerOptions = RunOptions & {
     status: "running" | "passed" | "failed";
     durationMs?: number;
     error?: string;
+    sectionNumber?: number;
   }) => void;
   /** Called after a step with the page that step left current, before the pace pause. */
   onPreview?: (driver: AutomationDriver) => Promise<void>;
@@ -154,15 +161,23 @@ async function runFlowOnce(
     appPath
   };
 
+  const normalized =
+    flow.sections && !flow.steps.some(isSectionStep)
+      ? { steps: flow.steps, sections: flow.sections }
+      : normalizeFlowSections(flow.steps);
+  const execSteps = normalized.steps;
+  const flowSections = normalized.sections;
+
   try {
-    for (let i = 0; i < flow.steps.length; i++) {
-      const step = flow.steps[i]!;
+    for (let i = 0; i < execSteps.length; i++) {
+      const step = execSteps[i]!;
+      const sectionNumber = sectionForIndex(flowSections, i)?.number;
       const stepRetry = options.stepRetry ?? 0;
       let stepReport: StepReport | null = null;
       for (let attempt = 0; attempt <= stepRetry; attempt++) {
         const t0 = Date.now();
         const command = formatStep(step);
-        options.onStep?.({ index: i, command, status: "running" });
+        options.onStep?.({ index: i, command, status: "running", sectionNumber });
         try {
           await executeStep(step, state, flow, {
             appPath,
@@ -182,13 +197,15 @@ async function runFlowOnce(
             status: "passed",
             durationMs: Date.now() - t0,
             locator: state.lastLocator,
-            screenshot: undefined
+            screenshot: undefined,
+            sectionNumber
           };
           options.onStep?.({
             index: i,
             command,
             status: "passed",
-            durationMs: Date.now() - t0
+            durationMs: Date.now() - t0,
+            sectionNumber
           });
           break;
         } catch (err) {
@@ -203,7 +220,8 @@ async function runFlowOnce(
             status: "failed",
             durationMs: Date.now() - t0,
             error: msg,
-            locator: state.lastLocator
+            locator: state.lastLocator,
+            sectionNumber
           };
           try {
             if (state.driver) {
@@ -220,7 +238,8 @@ async function runFlowOnce(
             command,
             status: "failed",
             durationMs: Date.now() - t0,
-            error: msg
+            error: msg,
+            sectionNumber
           });
           runError = err instanceof Error ? err : new Error(String(err));
           break;
@@ -243,6 +262,10 @@ async function runFlowOnce(
   }
 
   const finishedAt = new Date().toISOString();
+  const sections = buildSectionReports(flowSections, steps, {
+    runFinished: true,
+    finishedAt
+  });
   const report: RunReport = {
     runId,
     flowName: flow.name ?? flow.appId,
@@ -253,6 +276,7 @@ async function runFlowOnce(
     status,
     device: deviceInfo,
     steps,
+    sections,
     reportDir
   };
 

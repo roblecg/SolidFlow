@@ -16,8 +16,10 @@ import {
 } from "./logs.js";
 import { resolveAppPath } from "../config.js";
 import { listCommands } from "../flow/commands.js";
+import { formatFlowContent } from "../flow/format.js";
 import { parseFlowContent, parseFlowFile } from "../flow/parser.js";
 import { runFlowFile, type DriverSlot } from "../flow/runner.js";
+import type { FlowSection } from "../types.js";
 import {
   createWorkspaceDir,
   createWorkspaceFile,
@@ -179,9 +181,17 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       sendJson(res, 400, { error: "path and content are required" });
       return;
     }
-    await writeFlow(body.path, body.content);
+    let content = body.content;
+    try {
+      content = formatFlowContent(content);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, 400, { error: `Format failed: ${message}` });
+      return;
+    }
+    await writeFlow(body.path, content);
     appLog("info", `Saved flow ${body.path}`);
-    sendJson(res, 200, { ok: true });
+    sendJson(res, 200, { ok: true, content });
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/file") {
@@ -205,7 +215,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     if (body.content !== undefined) {
-      await writeFlow(body.path, body.content);
+      let content = body.content;
+      try {
+        content = formatFlowContent(content);
+      } catch {
+        // Run still attempts parse; keep raw content if format fails.
+      }
+      await writeFlow(body.path, content);
     }
     await setRecordingPaused(true);
     const slot: DriverSlot = { current: borrowDriver() };
@@ -217,12 +233,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const runId = newRunId();
     const fileName = body.path.split("/").pop()?.replace(/\.ya?ml$/i, "") ?? body.path;
     let flowName = fileName;
+    let flowSections: FlowSection[] = [];
     try {
-      flowName = parseFlowFile(resolveFlowPath(body.path)).name || fileName;
+      const flow = parseFlowFile(resolveFlowPath(body.path));
+      flowName = flow.name || fileName;
+      flowSections = flow.sections ?? [];
     } catch {
       // The runner reports the parse error. Keep the file name on the log row.
     }
-    beginTestRun(runId, flowName, body.path);
+    beginTestRun(runId, flowName, body.path, flowSections);
     appLog("info", `Run started: ${body.path}`);
     try {
       const report = await runFlowFile(resolveFlowPath(body.path), {
@@ -250,8 +269,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           command: step.command,
           status: step.status,
           error: step.error,
-          durationMs: step.durationMs
-        }))
+          durationMs: step.durationMs,
+          sectionNumber: step.sectionNumber
+        })),
+        sections: report.sections
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

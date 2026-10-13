@@ -5,11 +5,13 @@ const stage = document.getElementById("stage");
 const menu = document.getElementById("menu");
 const statusEl = document.getElementById("status");
 const testLogsEl = document.getElementById("test-logs");
+const sectionLogsEl = document.getElementById("section-logs");
 const appLogsEl = document.getElementById("app-logs");
 const appLogListEl = document.getElementById("app-log-list");
 const logSearchEl = document.getElementById("log-search");
 let logTab = "test";
 let logPoll = 0;
+const expandedSections = new Set();
 const fileLabel = document.getElementById("file-label");
 
 let currentPath = "";
@@ -264,10 +266,13 @@ async function save() {
     setStatus("Create or open a flow first", "bad");
     return;
   }
-  await api("/api/file", {
+  const result = await api("/api/file", {
     method: "PUT",
     body: JSON.stringify({ path: currentPath, content: editor.value })
   });
+  if (result.content !== undefined) {
+    editor.value = result.content;
+  }
   setStatus("Saved " + currentPath, "ok");
 }
 
@@ -542,8 +547,10 @@ document.getElementById("run").onclick = async () => {
 function showLogTab(next) {
   logTab = next;
   document.getElementById("tab-test").classList.toggle("active", next === "test");
+  document.getElementById("tab-sections").classList.toggle("active", next === "sections");
   document.getElementById("tab-app").classList.toggle("active", next === "app");
   testLogsEl.hidden = next !== "test";
+  sectionLogsEl.hidden = next !== "sections";
   appLogsEl.hidden = next !== "app";
 }
 
@@ -567,6 +574,22 @@ function formatClock(iso) {
 }
 
 let testSignature = "";
+let sectionSignature = "";
+let latestTestRuns = [];
+
+function statusMark(status) {
+  if (status === "failed") return "✕";
+  if (status === "running") return "…";
+  if (status === "skipped" || status === "pending") return "–";
+  return "✓";
+}
+
+function formatStatusLabel(status, completed, total) {
+  const label =
+    status === "pending" ? "Pending" : status.charAt(0).toUpperCase() + status.slice(1);
+  if (total == null) return label;
+  return label + " (" + completed + "/" + total + ")";
+}
 
 function renderTestLogs(runs) {
   const signature = JSON.stringify(runs);
@@ -591,7 +614,7 @@ function renderTestLogs(runs) {
     clock.textContent = formatClock(run.startedAt);
     const mark = document.createElement("span");
     mark.className = "mark " + run.status;
-    mark.textContent = run.status === "failed" ? "✕" : run.status === "running" ? "…" : "✓";
+    mark.textContent = statusMark(run.status);
     const time = document.createElement("span");
     time.className = "log-time";
     time.textContent = run.status === "running" && !total ? "" : formatDuration(total);
@@ -602,7 +625,7 @@ function renderTestLogs(runs) {
       row.className = "log-step " + step.status;
       const icon = document.createElement("span");
       icon.className = "mark";
-      icon.textContent = step.status === "failed" ? "✕" : step.status === "running" ? "…" : "✓";
+      icon.textContent = statusMark(step.status);
       const label = document.createElement("span");
       label.textContent = step.label || step.command;
       const secs = document.createElement("span");
@@ -620,6 +643,156 @@ function renderTestLogs(runs) {
     testLogsEl.append(block);
   }
   testLogsEl.scrollTop = scroll;
+}
+
+function shortCommand(command) {
+  if (!command) return "";
+  const match = /^(\w+)/.exec(command);
+  return match ? match[1] : command;
+}
+
+function renderSectionLogs(runs) {
+  const signature = JSON.stringify(
+    runs.map(run => ({
+      id: run.id,
+      status: run.status,
+      sections: run.sections
+    }))
+  );
+  if (signature === sectionSignature) return;
+  sectionSignature = signature;
+  const scroll = sectionLogsEl.scrollTop;
+  sectionLogsEl.innerHTML = "";
+  if (!runs.length) {
+    sectionLogsEl.textContent = "No test runs yet.";
+    return;
+  }
+  for (const run of runs) {
+    const block = document.createElement("article");
+    block.className = "log-run";
+    const title = document.createElement("div");
+    title.className = "log-run-title";
+    title.textContent = run.name;
+    const meta = document.createElement("div");
+    meta.className = "log-run-meta";
+    const clock = document.createElement("span");
+    clock.textContent = formatClock(run.startedAt);
+    const mark = document.createElement("span");
+    mark.className = "mark " + run.status;
+    mark.textContent = statusMark(run.status);
+    meta.append(clock, mark);
+    block.append(title, meta);
+
+    const sections = (run.sections || []).slice().sort((a, b) => a.number - b.number);
+    if (!sections.length) {
+      const empty = document.createElement("div");
+      empty.className = "muted";
+      empty.textContent = "No sections in this run.";
+      block.append(empty);
+      sectionLogsEl.append(block);
+      continue;
+    }
+
+    const table = document.createElement("div");
+    table.className = "section-table";
+    const head = document.createElement("div");
+    head.className = "section-row section-head";
+    head.innerHTML =
+      "<span></span><span>Number</span><span>Name</span><span>Description</span><span>Status</span>";
+    table.append(head);
+
+    for (const section of sections) {
+      const key = run.id + ":" + section.number;
+      const open = expandedSections.has(key);
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "section-row section-summary " + section.status;
+      row.setAttribute("aria-expanded", open ? "true" : "false");
+      const toggle = document.createElement("span");
+      toggle.className = "section-toggle";
+      toggle.textContent = open ? "▼" : "▶";
+      const number = document.createElement("span");
+      number.textContent = String(section.number);
+      const name = document.createElement("span");
+      name.textContent = section.name;
+      const description = document.createElement("span");
+      description.textContent = section.description || "";
+      const status = document.createElement("span");
+      status.className = "section-status mark " + section.status;
+      status.textContent = formatStatusLabel(
+        section.status,
+        section.completedSteps,
+        section.totalSteps
+      );
+      row.append(toggle, number, name, description, status);
+      row.onclick = () => {
+        if (expandedSections.has(key)) expandedSections.delete(key);
+        else expandedSections.add(key);
+        sectionSignature = "";
+        renderSectionLogs(latestTestRuns);
+      };
+      table.append(row);
+
+      if (open) {
+        const details = document.createElement("div");
+        details.className = "section-details";
+        for (const step of section.steps || []) {
+          const stepRow = document.createElement("div");
+          stepRow.className = "log-step section-step " + step.status;
+          const icon = document.createElement("span");
+          icon.className = "mark";
+          icon.textContent = statusMark(step.status);
+          const label = document.createElement("span");
+          label.textContent = step.label || shortCommand(step.command) || step.command;
+          stepRow.append(icon, label);
+          details.append(stepRow);
+        }
+        if (section.failure) {
+          const fail = document.createElement("div");
+          fail.className = "section-failure";
+          fail.innerHTML =
+            "<strong>Failed Command:</strong> " +
+            escapeHtml(section.failure.command) +
+            "<br/><strong>Error:</strong> " +
+            escapeHtml(section.failure.error) +
+            "<br/><strong>Timestamp:</strong> " +
+            escapeHtml(formatFailureTime(section.failure.timestamp));
+          details.append(fail);
+        }
+        table.append(details);
+      }
+    }
+    block.append(table);
+    sectionLogsEl.append(block);
+  }
+  sectionLogsEl.scrollTop = scroll;
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function formatFailureTime(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  const pad = n => String(n).padStart(2, "0");
+  return (
+    date.getFullYear() +
+    "-" +
+    pad(date.getMonth() + 1) +
+    "-" +
+    pad(date.getDate()) +
+    " " +
+    pad(date.getHours()) +
+    ":" +
+    pad(date.getMinutes()) +
+    ":" +
+    pad(date.getSeconds())
+  );
 }
 
 let appSignature = "";
@@ -658,7 +831,9 @@ async function refreshLogs() {
       api("/api/logs?kind=test"),
       api("/api/logs?kind=app")
     ]);
-    renderTestLogs(tests.runs || []);
+    latestTestRuns = tests.runs || [];
+    renderTestLogs(latestTestRuns);
+    renderSectionLogs(latestTestRuns);
     latestAppEntries = apps.entries || [];
     renderAppLogs(latestAppEntries);
   } catch {
@@ -667,12 +842,14 @@ async function refreshLogs() {
 }
 
 document.getElementById("tab-test").onclick = () => showLogTab("test");
+document.getElementById("tab-sections").onclick = () => showLogTab("sections");
 document.getElementById("tab-app").onclick = () => showLogTab("app");
 logSearchEl.addEventListener("input", () => {
   renderAppLogs(latestAppEntries);
 });
 document.getElementById("clear-logs").onclick = async () => {
-  await api("/api/logs?kind=" + logTab, { method: "DELETE" });
+  const kind = logTab === "sections" ? "test" : logTab;
+  await api("/api/logs?kind=" + kind, { method: "DELETE" });
   void refreshLogs();
 };
 logPoll = window.setInterval(() => {
