@@ -46,7 +46,7 @@ export type TestRunLog = {
   path: string;
   startedAt: string;
   finishedAt?: string;
-  status: "running" | "passed" | "failed";
+  status: "running" | "passed" | "failed" | "stopped";
   steps: TestStepLog[];
   sectionDefs: TestSectionDef[];
 };
@@ -122,7 +122,7 @@ export function noteTestStep(
   });
 }
 
-export function finishTestRun(runId: string, status: "passed" | "failed"): void {
+export function finishTestRun(runId: string, status: "passed" | "failed" | "stopped"): void {
   const run = testRuns.find(item => item.id === runId);
   if (!run) return;
   run.status = status;

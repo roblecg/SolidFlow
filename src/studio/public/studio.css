@@ -611,6 +611,14 @@ html[data-edge="top-right"], html[data-edge="bottom-left"] { cursor: nesw-resize
   font-weight: 600;
 }
 .btn-primary:disabled { opacity: 0.6; }
+.btn-stop {
+  background: #d92d20;
+  color: #fff;
+  border-color: #b42318;
+  font-weight: 600;
+}
+.btn-stop:hover { background: #b42318; }
+.log-run-meta .stopped { color: #b54708; }
 
 .menu, .flyout {
   position: fixed;

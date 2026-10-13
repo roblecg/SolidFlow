@@ -71,7 +71,7 @@ export type RunReport = {
   driver: DriverKind;
   startedAt: string;
   finishedAt: string;
-  status: "passed" | "failed";
+  status: "passed" | "failed" | "stopped";
   device: DeviceInfo;
   steps: StepReport[];
   sections: SectionReport[];
@@ -110,5 +110,12 @@ export class FlowError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "FlowError";
+  }
+}
+
+export class RunStoppedError extends Error {
+  constructor(message = "Test stopped by user") {
+    super(message);
+    this.name = "RunStoppedError";
   }
 }

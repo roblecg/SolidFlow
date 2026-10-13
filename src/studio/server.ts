@@ -61,6 +61,7 @@ type LiveRun = {
 };
 
 const liveRun: LiveRun = { running: false, command: "", status: "idle", log: [] };
+let runAbort: AbortController | null = null;
 
 const PUBLIC_DIR = join(packageRoot(), "src/studio/public");
 
@@ -207,8 +208,24 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     sendJson(res, 200, { path });
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/run/stop") {
+    if (!liveRun.running || !runAbort) {
+      sendJson(res, 200, { ok: true, stopped: false });
+      return;
+    }
+    runAbort.abort();
+    liveRun.command = "Stopping…";
+    liveRun.status = "stopping";
+    appLog("info", "Stop requested — finishing the current step, then ending the run");
+    sendJson(res, 200, { ok: true, stopped: true });
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/run") {
     if (rejectWithoutWorkspace(res)) return;
+    if (liveRun.running) {
+      sendJson(res, 409, { error: "A test is already running. Stop it before starting another." });
+      return;
+    }
     const body = await readBody<{ path?: string; content?: string }>(req);
     if (!body.path) {
       sendJson(res, 400, { error: "path is required" });
@@ -226,6 +243,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     await setRecordingPaused(true);
     const slot: DriverSlot = { current: borrowDriver() };
     const config = workspaceConfig();
+    const abort = new AbortController();
+    runAbort = abort;
     liveRun.running = true;
     liveRun.log = [];
     liveRun.status = "running";
@@ -251,6 +270,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         paceMs: STUDIO_PACE_MS,
         keepDriver: true,
         driverSlot: slot,
+        signal: abort.signal,
         onStep: event => {
           liveRun.command = event.command;
           liveRun.status = event.status;
@@ -260,7 +280,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         onPreview: publishRunPreview
       }, resolveAppPath(config));
       finishTestRun(runId, report.status);
-      appLog(report.status === "passed" ? "info" : "error", `Run ${report.status}: ${body.path}`);
+      const level = report.status === "passed" ? "info" : report.status === "stopped" ? "warn" : "error";
+      appLog(level, `Run ${report.status}: ${body.path}`);
       liveRun.status = report.status;
       sendJson(res, 200, {
         status: report.status,
@@ -285,6 +306,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       });
     } finally {
       liveRun.running = false;
+      runAbort = null;
       adoptDriver(slot.current);
       clearRunPreview();
       await setRecordingPaused(false);

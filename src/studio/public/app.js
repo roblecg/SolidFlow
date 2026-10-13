@@ -496,7 +496,32 @@ document.getElementById("disconnect").onclick = async () => {
   setStatus("Disconnected");
 };
 document.getElementById("save").onclick = () => save().catch(err => setStatus(err.message, "bad"));
-document.getElementById("run").onclick = async () => {
+
+let testRunning = false;
+const runBtn = document.getElementById("run");
+
+function setRunButton(mode) {
+  if (mode === "stop") {
+    runBtn.textContent = "Stop test";
+    runBtn.classList.remove("btn-primary");
+    runBtn.classList.add("btn-stop");
+  } else {
+    runBtn.textContent = "Run test";
+    runBtn.classList.remove("btn-stop");
+    runBtn.classList.add("btn-primary");
+  }
+}
+
+runBtn.onclick = async () => {
+  if (testRunning) {
+    setStatus("Stopping after the current step…");
+    try {
+      await api("/api/run/stop", { method: "POST" });
+    } catch (err) {
+      setStatus(err.message, "bad");
+    }
+    return;
+  }
   if (!currentPath) {
     setStatus("Open a flow first", "bad");
     return;
@@ -505,6 +530,8 @@ document.getElementById("run").onclick = async () => {
     setStatus("Open a YAML flow to run it", "bad");
     return;
   }
+  testRunning = true;
+  setRunButton("stop");
   setStatus("Running on the app window…");
   showLogTab("test");
   window.clearInterval(poll);
@@ -532,12 +559,16 @@ document.getElementById("run").onclick = async () => {
     });
     if (result.status === "passed") {
       setStatus("Passed", "ok");
+    } else if (result.status === "stopped") {
+      setStatus("Stopped", "muted");
     } else {
       setStatus(result.error || "Failed", "bad");
     }
   } catch (err) {
     setStatus(err.message, "bad");
   } finally {
+    testRunning = false;
+    setRunButton("run");
     window.clearInterval(liveTimer);
     startPoll();
     void refreshLogs();
@@ -579,7 +610,8 @@ let latestTestRuns = [];
 
 function statusMark(status) {
   if (status === "failed") return "✕";
-  if (status === "running") return "…";
+  if (status === "running" || status === "stopping") return "…";
+  if (status === "stopped") return "■";
   if (status === "skipped" || status === "pending") return "–";
   return "✓";
 }

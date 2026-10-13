@@ -11,7 +11,7 @@ import type {
   RunReport,
   StepReport
 } from "../types.js";
-import { FlowError } from "../types.js";
+import { FlowError, RunStoppedError } from "../types.js";
 import { parseStep } from "./steps.js";
 import { parseFlowFile } from "./parser.js";
 import {
@@ -65,6 +65,8 @@ export type DriverSlot = { current: AutomationDriver | null };
 export type RunnerOptions = RunOptions & {
   keepDriver?: boolean;
   driverSlot?: DriverSlot;
+  /** When aborted, finish the current step then stop before the next one. */
+  signal?: AbortSignal;
   onStep?: (event: {
     index: number;
     command: string;
@@ -170,11 +172,21 @@ async function runFlowOnce(
 
   try {
     for (let i = 0; i < execSteps.length; i++) {
+      if (options.signal?.aborted) {
+        status = "stopped";
+        runError = new RunStoppedError();
+        break;
+      }
       const step = execSteps[i]!;
       const sectionNumber = sectionForIndex(flowSections, i)?.number;
       const stepRetry = options.stepRetry ?? 0;
       let stepReport: StepReport | null = null;
       for (let attempt = 0; attempt <= stepRetry; attempt++) {
+        if (options.signal?.aborted) {
+          status = "stopped";
+          runError = new RunStoppedError();
+          break;
+        }
         const t0 = Date.now();
         const command = formatStep(step);
         options.onStep?.({ index: i, command, status: "running", sectionNumber });
@@ -190,7 +202,7 @@ async function runFlowOnce(
             paceMs
           });
           if (state.driver) await options.onPreview?.(state.driver).catch(() => {});
-          if (paceMs) await delay(paceMs);
+          if (paceMs) await delay(paceMs, options.signal);
           stepReport = {
             index: i,
             command,
@@ -210,8 +222,8 @@ async function runFlowOnce(
           break;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          if (attempt < stepRetry) {
-            await delay(500);
+          if (attempt < stepRetry && !options.signal?.aborted) {
+            await delay(500, options.signal);
             continue;
           }
           stepReport = {
@@ -247,6 +259,11 @@ async function runFlowOnce(
       }
       if (stepReport && stepReport.status === "passed") steps.push(stepReport);
       if (runError) break;
+      if (options.signal?.aborted) {
+        status = "stopped";
+        runError = new RunStoppedError();
+        break;
+      }
     }
   } finally {
     if (state.driver) {
@@ -281,7 +298,7 @@ async function runFlowOnce(
   };
 
   await writeReports(report);
-  if (runError) {
+  if (runError && !(runError instanceof RunStoppedError)) {
     throw runError;
   }
   return report;
@@ -860,8 +877,20 @@ function formatStep(step: FlowStep): string {
   return k ? `${k}: ${JSON.stringify(step[k])}` : "{}";
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** A timed-out request may already have clicked or typed, so it is never retried. */
