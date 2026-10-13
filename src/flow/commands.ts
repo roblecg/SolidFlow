@@ -113,6 +113,18 @@ const SPECS: Spec[] = [
       type: "template",
       body: "- section:\n    number: 1\n    name: Section name\n    description: What this section covers\n    steps:"
     }
+  },
+  {
+    name: "archiveData",
+    category: "SolidFlow",
+    summary:
+      "Copy or move (cut) a folder's contents into this run's test-results/.../archive. Waits until transfer finishes. action: copy | move.",
+    available: true,
+    usesSelector: false,
+    insert: {
+      type: "template",
+      body: "- archiveData:\n    action: move\n    location: path/to/folder"
+    }
   }
 ];
 

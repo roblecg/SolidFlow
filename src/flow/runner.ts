@@ -18,7 +18,8 @@ import {
   buildSectionReports,
   isSectionStep,
   normalizeFlowSections,
-  sectionForIndex
+  sectionForIndex,
+  UNASSIGNED_SECTION
 } from "./sections.js";
 import { createDriver, inferDriver } from "../driver/registry.js";
 import { defaultLocatorResolver } from "../driver/locator.js";
@@ -30,6 +31,7 @@ import { uniqueRunFolder } from "../report/run-folder.js";
 import { reportRoot as workspaceReportRoot } from "../studio/workspace.js";
 import { writeReports } from "../report/index.js";
 import { canonicalCommand, unavailableReason } from "./commands.js";
+import { executeArchiveData } from "./archive-data.js";
 import { createScriptState, evalFlowExpression } from "./script-env.js";
 import { desktopCommandNeedsPage, executeDesktopCommand } from "./desktop-commands.js";
 import {
@@ -178,7 +180,10 @@ async function runFlowOnce(
         break;
       }
       const step = execSteps[i]!;
-      const sectionNumber = sectionForIndex(flowSections, i)?.number;
+      const section = sectionForIndex(flowSections, i);
+      const sectionNumber = section?.number;
+      const sectionName =
+        section?.name ?? flow.name ?? flow.appId ?? UNASSIGNED_SECTION.name;
       const stepRetry = options.stepRetry ?? 0;
       let stepReport: StepReport | null = null;
       for (let attempt = 0; attempt <= stepRetry; attempt++) {
@@ -198,8 +203,10 @@ async function runFlowOnce(
             locale: flow.locale ?? "en",
             headless: options.headless,
             screenshotDir,
+            reportDir,
             flowPath,
-            paceMs
+            paceMs,
+            sectionName
           });
           if (state.driver) await options.onPreview?.(state.driver).catch(() => {});
           if (paceMs) await delay(paceMs, options.signal);
@@ -311,8 +318,12 @@ type StepCtx = {
   locale: string;
   headless?: boolean;
   screenshotDir: string;
+  /** This run's folder under test-results. */
+  reportDir: string;
   flowPath?: string;
   paceMs: number;
+  /** Current section (or Unassigned / flow) name for archive paths. */
+  sectionName?: string;
 };
 
 async function executeStep(
@@ -550,6 +561,21 @@ async function executeStepBody(
         if (code === 0) res();
         else rej(new Error(`Shell command exited with ${code}`));
       });
+    });
+    return;
+  }
+
+  if (name === "archiveData") {
+    if (parsed.kind !== "complex" || !isRecord(parsed.value)) {
+      throw new FlowError('archiveData requires action and location, e.g. action: copy');
+    }
+    await executeArchiveData({
+      action: parsed.value.action,
+      location: parsed.value.location,
+      flowDir: state.flowDir,
+      sectionName: ctx.sectionName ?? flow.name ?? flow.appId ?? UNASSIGNED_SECTION.name,
+      env: state.env,
+      reportDir: ctx.reportDir
     });
     return;
   }
