@@ -40,6 +40,7 @@ import {
 } from "../driver/native-frame.js";
 
 const activeAppLocks = new Set<string>();
+const FIELD_WAIT_MS = 20_000;
 
 type ExecState = {
   driver: AutomationDriver | null;
@@ -549,13 +550,13 @@ async function executeStepBody(
       }
       const dialog = activeNativeWindow(driver);
       if (dialog) {
-        await invokeNativeControl(dialog, q);
-        await driver.releaseClosedNativeWindow();
-        return;
+        const stayedOnWindow = await settleNativeField(driver, q, timeout => invokeNativeControl(dialog, q, timeout));
+        if (stayedOnWindow) return;
       }
-      const { locator, match } = await defaultLocatorResolver.resolve(page, q, index);
+      const activePage = driver.getPage();
+      const { locator, match } = await resolveReady(activePage, q, index);
       state.lastLocator = match;
-      await presentTarget(page, locator, ctx.paceMs);
+      await presentTarget(activePage, locator, ctx.paceMs);
       if (isRecord(raw) && typeof raw.enabled === "boolean" && (await locator.isEnabled()) !== raw.enabled) {
         throw new FlowError(`Element "${q}" did not match enabled: ${String(raw.enabled)}`);
       }
@@ -577,16 +578,18 @@ async function executeStepBody(
       const field = parts.length > 1 ? parts[0]! : "";
       const dialog = activeNativeWindow(driver);
       if (dialog) {
-        await setNativeText(dialog, field, typed);
-        await driver.releaseClosedNativeWindow();
-        return;
+        const stayedOnWindow = await settleNativeField(driver, field || undefined, timeout =>
+          setNativeText(dialog, field, typed, timeout)
+        );
+        if (stayedOnWindow) return;
       }
       const text = typed;
       const target = field || undefined;
+      const currentPage = driver.getPage();
       if (target) {
-        const { locator, match } = await defaultLocatorResolver.resolve(page, target);
+        const { locator, match } = await resolveReady(currentPage, target);
         state.lastLocator = match;
-        await presentTarget(page, locator, ctx.paceMs);
+        await presentTarget(currentPage, locator, ctx.paceMs);
         if (ctx.paceMs) {
           await locator.click();
           await locator.fill("");
@@ -595,7 +598,7 @@ async function executeStepBody(
           await locator.fill(text);
         }
       } else {
-        await page.keyboard.type(text, { delay: ctx.paceMs ? 70 : 0 });
+        await currentPage.keyboard.type(text, { delay: ctx.paceMs ? 70 : 0 });
       }
       return;
     }
@@ -835,6 +838,56 @@ function formatStep(step: FlowStep): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
+}
+
+/** A timed-out request may already have clicked or typed, so it is never retried. */
+function canUseWebField(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("is not in") || message.includes("is not ready") || message.includes("cannot be edited");
+}
+
+/** Keep looking for a control that appears after its window, and use the web page once that page has it. */
+async function settleNativeField(
+  driver: AutomationDriver,
+  selector: string | undefined,
+  act: (timeoutMs: number) => Promise<void>
+): Promise<boolean> {
+  const started = Date.now();
+  let last: unknown;
+  while (Date.now() - started < FIELD_WAIT_MS) {
+    const slice = Math.max(200, Math.min(1_500, FIELD_WAIT_MS - (Date.now() - started)));
+    try {
+      await act(last === undefined ? 0 : slice);
+      await driver.releaseClosedNativeWindow();
+      return true;
+    } catch (err) {
+      last = err;
+      if (!canUseWebField(err)) throw err;
+    }
+    if (await driver.useWebWindow(selector)) return false;
+    if (Date.now() - started >= FIELD_WAIT_MS) break;
+    await delay(200);
+  }
+  throw last instanceof Error ? last : new FlowError("The control is not in the window.");
+}
+
+async function resolveReady(
+  page: import("playwright-core").Page,
+  query: string,
+  index?: number,
+  timeoutMs = 15_000
+): Promise<{ locator: import("playwright-core").Locator; match: LocatorMatch }> {
+  const started = Date.now();
+  let last: unknown;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      return await defaultLocatorResolver.resolve(page, query, index);
+    } catch (err) {
+      last = err;
+      await delay(200);
+    }
+  }
+  throw last instanceof Error ? last : new Error(`No element matched locator: ${query}`);
 }
 
 async function actOnWindow(driver: AutomationDriver, action: CaptionAction): Promise<void> {

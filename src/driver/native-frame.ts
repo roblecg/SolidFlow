@@ -36,7 +36,7 @@ export type NativeFrame = FrameLayout & { png: Buffer };
 
 export type NativeApp = { pid: number; appPath: string; hwnd?: string };
 
-export type NativePopup = { hwnd: string; title: string };
+export type NativePopup = { hwnd: string; title: string; className?: string };
 
 export type PixelHint = { width: number; height: number; cssWidth: number; cssHeight: number };
 
@@ -104,6 +104,10 @@ export function hitNode(nodes: FrameNode[], x: number, y: number): FrameNode | n
   const hits = nodes.filter(node => contains(node.bounds, x, y));
   hits.sort((a, b) => a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height);
   return hits[0] ?? null;
+}
+
+export function isClassicDialog(popup: NativePopup): boolean {
+  return popup.className === "#32770";
 }
 
 export function chooseNativePopup(
@@ -176,7 +180,7 @@ export async function pagePixelHint(page: Page): Promise<PixelHint | undefined> 
 export async function captureNativeFrame(app: NativeApp, hint?: PixelHint): Promise<NativeFrame | null> {
   if (process.platform !== "win32") return null;
   try {
-    const response = await helperRequest({ op: "capture", ...requestFields(app, hint) });
+    const response = await helperRequest({ op: "capture", ...requestFields(app, hint) }, 20_000);
     if (!response?.ok || !response.pngPath) {
       lastCaptureError = response?.error || "Window capture did not return an image";
       return null;
@@ -221,15 +225,20 @@ export async function nativeControlVisible(
 export async function listNativePopups(app: NativeApp): Promise<NativePopup[]> {
   if (process.platform !== "win32") return [];
   const response = await helperRequest({ op: "windows", procId: app.pid, appPath: app.appPath });
-  if (!response?.ok || !Array.isArray(response.windows)) return [];
+  if (!response?.ok || !Array.isArray(response.windows)) {
+    throw new FlowError(response?.error || "Could not list the app windows.");
+  }
   return response.windows
     .filter(window => typeof window.hwnd === "string" && window.hwnd && typeof window.title === "string")
-    .map(window => ({ hwnd: window.hwnd as string, title: window.title as string }));
+    .map(window => ({
+      hwnd: window.hwnd as string,
+      title: window.title as string,
+      ...(typeof window.className === "string" && window.className ? { className: window.className } : {})
+    }));
 }
 
-export async function invokeNativeControl(app: NativeApp, name: string): Promise<void> {
-  const response = await nativeUi(app, "invoke", name);
-  if (!response?.ok) throw new FlowError(response?.error || `${name} is not in the window.`);
+export async function invokeNativeControl(app: NativeApp, name: string, timeoutMs = 0): Promise<void> {
+  await waitForNativeUi(() => nativeUi(app, "invoke", name), `${name} is not in the window.`, timeoutMs);
 }
 
 export async function nativeTextVisible(app: NativeApp, name: string): Promise<boolean> {
@@ -241,9 +250,8 @@ export async function nativeTextVisible(app: NativeApp, name: string): Promise<b
   return response.visible === true;
 }
 
-export async function setNativeText(app: NativeApp, name: string, text: string): Promise<void> {
-  const response = await nativeUi(app, "value", name, text);
-  if (!response?.ok) throw new FlowError(response?.error || "Could not type into the window.");
+export async function setNativeText(app: NativeApp, name: string, text: string, timeoutMs = 0): Promise<void> {
+  await waitForNativeUi(() => nativeUi(app, "value", name, text), "Could not type into the window.", timeoutMs);
 }
 
 export async function readNativeText(app: NativeApp, name: string): Promise<string> {
@@ -258,9 +266,31 @@ async function nativeUi(app: NativeApp, op: string, name: string, text = ""): Pr
   }
   if (!app.hwnd) throw new FlowError("The folder window is no longer open.");
   try {
-    return await helperRequest({ op, ...requestFields(app), name, text });
+    return await helperRequest({ op, ...requestFields(app), name, text }, 8_000);
   } catch (err) {
     throw new FlowError(err instanceof Error ? err.message : "Could not use the window.");
+  }
+}
+
+function controlStillLoading(error: string): boolean {
+  return error.includes(" is not in ") || error.includes(" is not ready in ");
+}
+
+async function waitForNativeUi(
+  attempt: () => Promise<HelperResponse | null>,
+  fallback: string,
+  timeoutMs: number
+): Promise<void> {
+  const started = Date.now();
+  let last = fallback;
+  for (;;) {
+    const response = await attempt();
+    if (response?.ok) return;
+    last = response?.error || fallback;
+    if (!controlStillLoading(last) || timeoutMs <= 0 || Date.now() - started >= timeoutMs) {
+      throw new FlowError(last);
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
   }
 }
 
@@ -357,7 +387,7 @@ type HelperResponse = {
   popup?: boolean;
   visible?: boolean;
   text?: string;
-  windows?: { hwnd?: string; title?: string }[];
+  windows?: { hwnd?: string; title?: string; className?: string }[];
   controls?: { name?: string; kind?: string; bounds?: Rect }[];
 };
 
@@ -461,8 +491,8 @@ class FrameHost {
   private warmed = false;
   private chain: Promise<unknown> = Promise.resolve();
 
-  request(body: Record<string, unknown>): Promise<HelperResponse> {
-    const run = this.chain.then(() => this.send(body));
+  request(body: Record<string, unknown>, timeoutMs?: number): Promise<HelperResponse> {
+    const run = this.chain.then(() => this.send(body, timeoutMs));
     this.chain = run.then(
       () => undefined,
       () => undefined
@@ -484,9 +514,9 @@ class FrameHost {
     child?.kill();
   }
 
-  private async send(body: Record<string, unknown>): Promise<HelperResponse> {
+  private async send(body: Record<string, unknown>, timeoutMs?: number): Promise<HelperResponse> {
     const child = this.ensure();
-    const timeoutMs = this.warmed ? 4_000 : 20_000;
+    const limitMs = Math.max(timeoutMs ?? 0, this.warmed ? 4_000 : 20_000);
     const response = await new Promise<HelperResponse>((resolve, reject) => {
       let settled = false;
       const finish = (ok: HelperResponse | null, error?: Error) => {
@@ -501,7 +531,7 @@ class FrameHost {
       const timer = setTimeout(() => {
         this.restart(new Error("Window capture timed out"));
         finish(null, new Error("Window capture timed out"));
-      }, timeoutMs);
+      }, limitMs);
       this.pending = {
         resolve: value => finish(value),
         reject: error => finish(null, error),
@@ -568,6 +598,7 @@ class FrameHost {
   }
 
   private restart(error: Error): void {
+    this.warmed = false;
     this.failPending(error);
     const child = this.child;
     this.child = null;
@@ -592,9 +623,9 @@ export function lastNativeFrameError(): string {
   return lastCaptureError;
 }
 
-function helperRequest(body: Record<string, unknown>): Promise<HelperResponse> {
+function helperRequest(body: Record<string, unknown>, timeoutMs?: number): Promise<HelperResponse> {
   if (!host) host = new FrameHost();
-  return host.request(body);
+  return host.request(body, timeoutMs);
 }
 
 process.on("exit", () => {

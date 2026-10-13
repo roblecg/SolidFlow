@@ -26,6 +26,8 @@ export interface AutomationDriver {
   releaseClosedNativeWindow(): Promise<void>;
   /** Process of the app under test. Its window title bar is not the SolidFlow studio window. */
   nativeApp(): { pid: number; appPath: string; hwnd?: string } | null;
+  /** Use the web page inside the focused native window when that window is a web view. */
+  useWebWindow(selector?: string): Promise<boolean>;
   /** WebView2 profile folder, kept across stopApp / relaunch until clearState. */
   profileDir?(): string | undefined;
 }

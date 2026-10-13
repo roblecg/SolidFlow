@@ -52,6 +52,43 @@ namespace SolidFlow {
 
     delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
 
+    const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    const uint INPUT_KEYBOARD = 1;
+    const uint KEYEVENTF_KEYUP = 0x0002;
+    const uint KEYEVENTF_UNICODE = 0x0004;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct KEYBDINPUT {
+      public ushort wVk;
+      public ushort wScan;
+      public uint dwFlags;
+      public uint time;
+      public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct MOUSEINPUT {
+      public int dx;
+      public int dy;
+      public uint mouseData;
+      public uint dwFlags;
+      public uint time;
+      public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    struct INPUTUNION {
+      [FieldOffset(0)] public MOUSEINPUT mi;
+      [FieldOffset(0)] public KEYBDINPUT ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct INPUT {
+      public uint type;
+      public INPUTUNION u;
+    }
+
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int awareness);
@@ -80,9 +117,12 @@ namespace SolidFlow {
     [DllImport("user32.dll", EntryPoint = "SendMessageW")] static extern IntPtr SendMessagePtr(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
-    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr hWnd);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
+    [DllImport("user32.dll")] static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+    [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint count, INPUT[] inputs, int size);
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int nIndex);
     [DllImport("user32.dll")] static extern int GetSystemMetricsForDpi(int nIndex, uint dpi);
@@ -111,7 +151,7 @@ namespace SolidFlow {
       if (op == "windows") return ListPopups(procId, appPath);
       IntPtr requested = ParseHwnd(hwndText);
       bool specific = requested != IntPtr.Zero;
-      if (specific && (op == "invoke" || op == "visible" || op == "value" || op == "caption")) {
+      if (specific && (op == "invoke" || op == "visible" || op == "value" || op == "read" || op == "caption")) {
         if (!IsWindow(requested) || !Related(requested, procId, appPath)) return "{\"ok\":false,\"error\":\"window not found\"}";
         if (op == "invoke") return InvokeNamed(requested, name ?? "");
         if (op == "visible") return VisibleNamed(requested, name ?? "");
@@ -155,7 +195,10 @@ namespace SolidFlow {
       return sent != IntPtr.Zero;
     }
 
+    // The helper is started hidden, so Windows swaps the first ShowWindow call it makes for SW_HIDE
+    // and would hide the target. Restoring through the window's own thread avoids that.
     static void FocusWindow(IntPtr hwnd) {
+      if (IsIconic(hwnd)) SysCommand(hwnd, SC_RESTORE);
       uint foregroundPid = 0;
       uint targetPid = 0;
       IntPtr foreground = GetForegroundWindow();
@@ -172,8 +215,6 @@ namespace SolidFlow {
         if (targetThread != 0 && targetThread != currentThread && targetThread != foregroundThread) {
           attachedTarget = AttachThreadInput(currentThread, targetThread, true);
         }
-        if (IsIconic(hwnd)) ShowWindow(hwnd, 9);
-        else ShowWindow(hwnd, 5);
         BringWindowToTop(hwnd);
         SetForegroundWindow(hwnd);
       } finally {
@@ -243,7 +284,7 @@ namespace SolidFlow {
       foreach (IntPtr hwnd in popupHits) {
         if (!first) json.Append(',');
         first = false;
-        json.Append("{\"hwnd\":\"" + HwndText(hwnd) + "\",\"title\":" + JsonString(WindowTitle(hwnd)) + "}");
+        json.Append("{\"hwnd\":\"" + HwndText(hwnd) + "\",\"title\":" + JsonString(WindowTitle(hwnd)) + ",\"className\":" + JsonString(ClassNameOf(hwnd)) + "}");
       }
       popupHits = null;
       json.Append("]}");
@@ -313,27 +354,45 @@ namespace SolidFlow {
       return "Folder:";
     }
 
+    static int ControlRank(AutomationElement el) {
+      try {
+        string cls = ClassNameOf(HwndOf(el));
+        string id = el.Current.AutomationId ?? "";
+        ControlType type = el.Current.ControlType;
+        if (cls == "Edit" || cls.StartsWith("RichEdit") || IsFilenameId(id) || type == ControlType.Edit || type == ControlType.Document || type == ControlType.ComboBox) return 0;
+        if (cls == "Button" || type == ControlType.Button || type == ControlType.Hyperlink || type == ControlType.SplitButton || type == ControlType.CheckBox || type == ControlType.RadioButton) return 1;
+        if (cls == "Static" || type == ControlType.Text) return 3;
+        return 2;
+      } catch {
+        return 9;
+      }
+    }
+
     static AutomationElement FindNamed(AutomationElement root, string name) {
       if (root == null || string.IsNullOrWhiteSpace(name)) return null;
-      AutomationElement editable = null;
-      AutomationElement button = null;
-      AutomationElement other = null;
+      AutomationElement byId = null;
+      try {
+        byId = root.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.AutomationIdProperty, name));
+      } catch { }
+      if (byId != null && ControlRank(byId) <= 1) return byId;
+      AutomationElement best = null;
+      int bestRank = 9;
       AutomationElementCollection all = root.FindAll(TreeScope.Descendants, Condition.TrueCondition);
       foreach (AutomationElement el in all) {
         if (!SameName(el, name)) continue;
-        string cls = ClassNameOf(HwndOf(el));
-        string id = el.Current.AutomationId ?? "";
-        if (cls == "Edit" || cls.StartsWith("RichEdit") || IsFilenameId(id)) editable = el;
-        else if (cls == "Button") button = el;
-        else if (other == null && cls != "Static") other = el;
+        int rank = ControlRank(el);
+        if (rank < bestRank) {
+          bestRank = rank;
+          best = el;
+        }
       }
-      if (editable != null) return editable;
+      if (bestRank <= 1) return best;
       if (IsFilenameLabel(name)) {
         AutomationElement field = FilenameEdit(root);
         if (field != null) return field;
       }
-      if (button != null) return button;
-      return other;
+      if (byId != null && ControlRank(byId) <= 2) return byId;
+      return bestRank <= 2 ? best : null;
     }
 
     static bool ClickHwnd(IntPtr hwnd) {
@@ -347,11 +406,33 @@ namespace SolidFlow {
       return true;
     }
 
-    static bool Act(AutomationElement el) {
+    static bool ClickBounds(AutomationElement el, IntPtr owner) {
+      System.Windows.Rect rect;
+      try {
+        if (el.Current.IsOffscreen) return false;
+        rect = el.Current.BoundingRectangle;
+      } catch { return false; }
+      if (rect.IsEmpty || rect.Width < 2 || rect.Height < 2) return false;
+      int x = (int)Math.Round(rect.X + rect.Width / 2.0);
+      int y = (int)Math.Round(rect.Y + rect.Height / 2.0);
+      POINT point = new POINT();
+      point.X = x;
+      point.Y = y;
+      IntPtr hit = WindowFromPoint(point);
+      if (hit == IntPtr.Zero || GetAncestor(hit, 2) != GetAncestor(owner, 2)) return false;
+      if (!SetCursorPos(x, y)) return false;
+      mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+      mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+      return true;
+    }
+
+    static bool Act(AutomationElement el, IntPtr owner) {
       object pattern;
       if (el.TryGetCurrentPattern(InvokePattern.Pattern, out pattern)) {
-        ((InvokePattern)pattern).Invoke();
-        return true;
+        try {
+          ((InvokePattern)pattern).Invoke();
+          return true;
+        } catch { }
       }
       IntPtr hwnd = HwndOf(el);
       string cls = ClassNameOf(hwnd);
@@ -363,26 +444,30 @@ namespace SolidFlow {
         return ClickHwnd(hwnd);
       }
       if (el.TryGetCurrentPattern(TogglePattern.Pattern, out pattern)) {
-        ((TogglePattern)pattern).Toggle();
-        return true;
+        try { ((TogglePattern)pattern).Toggle(); return true; } catch { }
       }
       if (el.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pattern)) {
-        ((SelectionItemPattern)pattern).Select();
-        return true;
+        try { ((SelectionItemPattern)pattern).Select(); return true; } catch { }
       }
       if (el.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out pattern)) {
-        ExpandCollapsePattern expand = (ExpandCollapsePattern)pattern;
-        if (expand.Current.ExpandCollapseState == ExpandCollapseState.Collapsed) expand.Expand();
-        else expand.Collapse();
-        return true;
+        try {
+          ExpandCollapsePattern expand = (ExpandCollapsePattern)pattern;
+          if (expand.Current.ExpandCollapseState == ExpandCollapseState.Collapsed) expand.Expand();
+          else expand.Collapse();
+          return true;
+        } catch { }
       }
-      return false;
+      if (owner == IntPtr.Zero) return false;
+      FocusWindow(owner);
+      try { el.SetFocus(); } catch { }
+      return ClickBounds(el, owner);
     }
 
     static string InvokeNamed(IntPtr hwnd, string name) {
       try {
         AutomationElement el = FindNamed(FromHwnd(hwnd), name);
-        if (el == null || !Act(el)) return "{\"ok\":false,\"error\":" + JsonString(name + " is not in " + WindowTitle(hwnd)) + "}";
+        if (el == null) return "{\"ok\":false,\"error\":" + JsonString(name + " is not in " + WindowTitle(hwnd)) + "}";
+        if (!Act(el, hwnd)) return "{\"ok\":false,\"error\":" + JsonString(name + " is not ready in " + WindowTitle(hwnd)) + "}";
         return "{\"ok\":true}";
       } catch (Exception ex) {
         return "{\"ok\":false,\"error\":" + JsonString(ex.Message) + "}";
@@ -415,8 +500,61 @@ namespace SolidFlow {
       }
       ValuePattern value = pattern as ValuePattern;
       if (value == null) return false;
-      value.SetValue(text ?? "");
-      return true;
+      try {
+        value.SetValue(text ?? "");
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    static bool ForegroundIs(IntPtr hwnd) {
+      IntPtr foreground = GetForegroundWindow();
+      if (foreground == IntPtr.Zero) return false;
+      if (foreground == hwnd) return true;
+      IntPtr root = GetAncestor(foreground, 2);
+      return root == hwnd;
+    }
+
+    static bool IsTextField(AutomationElement el) {
+      try {
+        string cls = ClassNameOf(HwndOf(el));
+        if (cls == "Edit" || cls.StartsWith("RichEdit")) return true;
+        return el.Current.ControlType == ControlType.Edit;
+      } catch {
+        return false;
+      }
+    }
+
+    static AutomationElement FocusedDescendant(AutomationElement root) {
+      AutomationElement focused;
+      try { focused = AutomationElement.FocusedElement; } catch { return null; }
+      if (focused == null || root == null) return null;
+      AutomationElement current = focused;
+      TreeWalker walker = TreeWalker.ControlViewWalker;
+      for (int i = 0; i < 40 && current != null; i++) {
+        try {
+          if (Automation.Compare(current, root)) return focused;
+        } catch { return null; }
+        try { current = walker.GetParent(current); } catch { return null; }
+      }
+      return null;
+    }
+
+    static bool TypeText(string text) {
+      if (string.IsNullOrEmpty(text)) return true;
+      INPUT[] inputs = new INPUT[text.Length * 2];
+      for (int i = 0; i < text.Length; i++) {
+        ushort scan = text[i];
+        inputs[i * 2].type = INPUT_KEYBOARD;
+        inputs[i * 2].u.ki.wScan = scan;
+        inputs[i * 2].u.ki.dwFlags = KEYEVENTF_UNICODE;
+        inputs[i * 2 + 1].type = INPUT_KEYBOARD;
+        inputs[i * 2 + 1].u.ki.wScan = scan;
+        inputs[i * 2 + 1].u.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+      }
+      uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+      return sent == (uint)inputs.Length;
     }
 
     static string ReadText(AutomationElement el) {
@@ -438,8 +576,24 @@ namespace SolidFlow {
     static string SetNamedValue(IntPtr hwnd, string name, string text) {
       try {
         AutomationElement root = FromHwnd(hwnd);
-        AutomationElement el = string.IsNullOrWhiteSpace(name) ? FilenameEdit(root) : FindNamed(root, name);
-        if (el == null) return "{\"ok\":false,\"error\":" + JsonString((name.Length == 0 ? "The text field" : name) + " is not in " + WindowTitle(hwnd)) + "}";
+        if (string.IsNullOrWhiteSpace(name)) {
+          AutomationElement file = FilenameEdit(root);
+          if (file != null) {
+            if (!WriteText(file, text)) return "{\"ok\":false,\"error\":\"The text field cannot be edited\"}";
+            return "{\"ok\":true}";
+          }
+          FocusWindow(hwnd);
+          System.Threading.Thread.Sleep(40);
+          AutomationElement focused = FocusedDescendant(root);
+          if (focused == null || !IsTextField(focused)) {
+            return "{\"ok\":false,\"error\":" + JsonString("The text field is not ready in " + WindowTitle(hwnd)) + "}";
+          }
+          if (WriteText(focused, text)) return "{\"ok\":true}";
+          if (ForegroundIs(hwnd) && TypeText(text ?? "")) return "{\"ok\":true}";
+          return "{\"ok\":false,\"error\":" + JsonString("The text field is not ready in " + WindowTitle(hwnd)) + "}";
+        }
+        AutomationElement el = FindNamed(root, name);
+        if (el == null) return "{\"ok\":false,\"error\":" + JsonString(name + " is not in " + WindowTitle(hwnd)) + "}";
         if (!WriteText(el, text)) return "{\"ok\":false,\"error\":" + JsonString(name + " cannot be edited") + "}";
         return "{\"ok\":true}";
       } catch (Exception ex) {

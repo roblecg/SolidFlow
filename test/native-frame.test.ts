@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { PNG } from "pngjs";
@@ -6,6 +8,7 @@ import {
   captionActionFor,
   captureNativeFrame,
   chooseNativePopup,
+  isClassicDialog,
   clipRect,
   compositePageIntoFrame,
   headerNodes,
@@ -105,6 +108,8 @@ describe("native window header", () => {
       { hwnd: "main", title: "CIM Document Exporter" },
       { hwnd: "folder", title: "Select output folder" }
     ];
+    expect(isClassicDialog({ hwnd: "1", title: "Select output folder", className: "#32770" })).toBe(true);
+    expect(isClassicDialog({ hwnd: "2", title: "Customer Portal", className: "Chrome_WidgetWin_1" })).toBe(false);
     expect(chooseNativePopup(windows, baseline, adopted)?.title).toBe("Select output folder");
     adopted.add("folder");
     expect(chooseNativePopup(windows, baseline, adopted)).toBeNull();
@@ -166,7 +171,9 @@ describe("native window header", () => {
       expect(popup, lastNativeFrameError()).toBeTruthy();
       if (!popup) return;
       expect(popup.title).toContain("Select output folder");
+      expect(popup.className).toBe("#32770");
       const frame = await captureNativeFrame({ pid: probe.pid ?? 0, appPath: exe, hwnd: popup.hwnd });
+      expect(frame, lastNativeFrameError()).toBeTruthy();
       expect(frame?.popup).toBe(true);
       expect(frame?.controls.some(control => control.label === "Cancel")).toBe(true);
       await invokeNativeControl({ pid: probe.pid ?? 0, appPath: exe, hwnd: popup.hwnd }, "Cancel");
@@ -176,6 +183,32 @@ describe("native window header", () => {
       }, 5_000);
       expect(gone).toBe(true);
     } finally {
+      if (probe.exitCode == null && !probe.killed) probe.kill();
+    }
+  }, 40_000);
+
+  it("waits until a field that loads after the window can be used", async () => {
+    if (process.platform !== "win32") return;
+    const root = process.env.SystemRoot || "C:\\Windows";
+    const exe = join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const flag = join(tmpdir(), `solidflow-username-${process.pid}.flag`);
+    await rm(flag, { force: true });
+    const probe = spawn(exe, ["-NoProfile", "-Sta", "-WindowStyle", "Hidden", "-Command", lateFieldScript(flag)], {
+      windowsHide: false,
+      stdio: "ignore"
+    });
+    try {
+      const popup = await waitForPopupWindow(probe.pid ?? 0, exe, "Customer Portal");
+      expect(popup, lastNativeFrameError()).toBeTruthy();
+      if (!popup) return;
+      const app = { pid: probe.pid ?? 0, appPath: exe, hwnd: popup.hwnd };
+      await expect(invokeNativeControl(app, "username", 0)).rejects.toThrow(/username is not in Customer Portal/);
+      await writeFile(flag, "go");
+      await invokeNativeControl(app, "username", 10_000);
+      await setNativeText(app, "", "admin");
+      expect(await readNativeText(app, "username")).toBe("admin");
+    } finally {
+      await rm(flag, { force: true });
       if (probe.exitCode == null && !probe.killed) probe.kill();
     }
   }, 40_000);
@@ -193,6 +226,7 @@ describe("native window header", () => {
       expect(popup, lastNativeFrameError()).toBeTruthy();
       if (!popup) return;
       const frame = await captureNativeFrame({ pid: probe.pid ?? 0, appPath: exe, hwnd: popup.hwnd });
+      expect(frame, lastNativeFrameError()).toBeTruthy();
       const field = frame?.controls.find(control => control.label === "Folder:" && control.tag === "edit");
       expect(field?.bounds.width).toBeGreaterThan(200);
       const app = { pid: probe.pid ?? 0, appPath: exe, hwnd: popup.hwnd };
@@ -215,6 +249,44 @@ function exitedWithin(child: ReturnType<typeof spawn>, ms: number): Promise<bool
       resolve(true);
     });
   });
+}
+
+function lateFieldScript(flag: string): string {
+  const path = flag.replace(/'/g, "''");
+  return [
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -AssemblyName System.Drawing",
+    `$flag = '${path}'`,
+    "Remove-Item -LiteralPath $flag -Force -ErrorAction SilentlyContinue",
+    "$main = New-Object System.Windows.Forms.Form",
+    "$main.Text = 'Target App Probe'",
+    "$main.StartPosition = 'Manual'",
+    "$main.Location = New-Object System.Drawing.Point(40, 40)",
+    "$main.ClientSize = New-Object System.Drawing.Size(640, 420)",
+    "$main.Show()",
+    "$portal = New-Object System.Windows.Forms.Form",
+    "$portal.Text = 'Customer Portal'",
+    "$portal.StartPosition = 'Manual'",
+    "$portal.Location = New-Object System.Drawing.Point(180, 140)",
+    "$portal.ClientSize = New-Object System.Drawing.Size(380, 260)",
+    "$portal.Show()",
+    "$added = $false",
+    "$deadline = [DateTime]::UtcNow.AddMinutes(2)",
+    "while ($main.Visible -and [DateTime]::UtcNow -lt $deadline) {",
+    "  if (-not $added -and (Test-Path -LiteralPath $flag)) {",
+    "    $added = $true",
+    "    $box = New-Object System.Windows.Forms.TextBox",
+    "    $box.Name = 'username'",
+    "    $box.Location = New-Object System.Drawing.Point(40, 48)",
+    "    $box.Size = New-Object System.Drawing.Size(220, 28)",
+    "    $portal.Controls.Add($box)",
+    "  }",
+    "  [System.Windows.Forms.Application]::DoEvents()",
+    "  Start-Sleep -Milliseconds 30",
+    "}",
+    "$portal.Dispose()",
+    "$main.Dispose()"
+  ].join("\n");
 }
 
 function probeScript(): string {

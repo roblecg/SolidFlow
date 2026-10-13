@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { FlowError, type DeviceInfo, type DriverKind } from "../types.js";
 import type { AutomationDriver, DriverContext } from "./types.js";
-import { chooseNativePopup, listNativePopups, type NativePopup } from "./native-frame.js";
+import { defaultLocatorResolver } from "./locator.js";
+import { chooseNativePopup, isClassicDialog, listNativePopups, type NativePopup } from "./native-frame.js";
 import { localeInitScript } from "./locale-init.js";
 import os from "node:os";
 
@@ -43,6 +44,10 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
       throw new FlowError("Connect the app before waiting for a window.");
     }
     const native = this.nativeApp();
+    if (native && process.platform === "win32") {
+      const open = await listNativePopups({ pid: native.pid, appPath: native.appPath }).catch(() => null);
+      if (open) this.forgetHiddenPopups(open);
+    }
     const seenPages = new Set(this.adoptedPages);
     const pending: Page[] = [];
     const onPage = (page: Page) => pending.push(page);
@@ -57,6 +62,8 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     };
     attach();
     const started = Date.now();
+    let heldNative: NativePopup | null = null;
+    let heldSince = 0;
     try {
       while (Date.now() - started < timeoutMs) {
         attach();
@@ -64,24 +71,37 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
           pending.find(item => !item.isClosed() && !seenPages.has(item)) ??
           this.listOpenPages().find(item => !seenPages.has(item));
         if (page) {
-          this.focusedNativeWindow = null;
-          this.page = page;
-          this.adoptedPages.add(page);
-          await page.bringToFront().catch(() => {});
-          const remaining = Math.max(1, timeoutMs - (Date.now() - started));
-          await page.waitForLoadState("domcontentloaded", { timeout: remaining }).catch(() => {});
+          await this.adoptPage(page, timeoutMs, started);
           return;
         }
         if (native && process.platform === "win32") {
           const windows = await listNativePopups({ pid: native.pid, appPath: native.appPath }).catch(() => []);
           const popup = chooseNativePopup(windows, this.nativePopupBaseline, this.adoptedNativePopups);
-          if (popup) {
-            this.focusedNativeWindow = popup;
-            this.adoptedNativePopups.add(popup.hwnd);
+          if (popup && isClassicDialog(popup)) {
+            this.focusNativePopup(popup);
             return;
+          }
+          if (popup) {
+            const web = await this.pageMatchingTitle(popup.title);
+            if (web) {
+              this.adoptedNativePopups.add(popup.hwnd);
+              await this.adoptPage(web, timeoutMs, started);
+              return;
+            }
+            if (!heldNative || heldNative.hwnd !== popup.hwnd) {
+              heldNative = popup;
+              heldSince = Date.now();
+            } else if (Date.now() - heldSince >= Math.min(8_000, timeoutMs)) {
+              this.focusNativePopup(popup);
+              return;
+            }
           }
         }
         await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (heldNative) {
+        this.focusNativePopup(heldNative);
+        return;
       }
     } finally {
       for (const context of listening) context.off("page", onPage);
@@ -89,6 +109,20 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     throw new FlowError(
       "No new window appeared in the connected app. A folder picker or other window of that app counts. A separate system browser does not."
     );
+  }
+
+  async useWebWindow(selector?: string): Promise<boolean> {
+    const focused = this.focusedNativeWindow;
+    if (!focused || isClassicDialog(focused)) return false;
+    const page =
+      (await this.pageMatchingTitle(focused.title)) ?? (selector ? await this.pageContaining(selector) : null);
+    if (!page) return false;
+    this.focusedNativeWindow = null;
+    this.page = page;
+    this.adoptedPages.add(page);
+    await page.bringToFront().catch(() => {});
+    await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
+    return true;
   }
 
   async switchToMain(): Promise<void> {
@@ -182,6 +216,68 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     this.mainPage = this.page;
     this.adoptedPages.clear();
     this.adoptedPages.add(this.page);
+  }
+
+  private focusNativePopup(popup: NativePopup): void {
+    this.focusedNativeWindow = popup;
+    this.adoptedNativePopups.add(popup.hwnd);
+  }
+
+  private async adoptPage(page: Page, timeoutMs: number, started: number): Promise<void> {
+    this.focusedNativeWindow = null;
+    this.page = page;
+    this.adoptedPages.add(page);
+    await page.bringToFront().catch(() => {});
+    const remaining = Math.max(1, timeoutMs - (Date.now() - started));
+    await page.waitForLoadState("domcontentloaded", { timeout: remaining }).catch(() => {});
+    await this.adoptWindowsTitled(page);
+  }
+
+  /** The native window that hosts an adopted page must not be reported as the next new window. */
+  private async adoptWindowsTitled(page: Page): Promise<void> {
+    const native = this.nativeApp();
+    if (!native || process.platform !== "win32") return;
+    const title = (await page.title().catch(() => "")).trim();
+    if (!title) return;
+    const windows = await listNativePopups({ pid: native.pid, appPath: native.appPath }).catch(() => []);
+    for (const window of windows) {
+      if (window.title.trim() === title && !isClassicDialog(window)) this.adoptedNativePopups.add(window.hwnd);
+    }
+  }
+
+  /** A window that was hidden and shown again keeps its handle, so it counts as new next time. */
+  private forgetHiddenPopups(open: NativePopup[]): void {
+    const visible = new Set(open.map(window => window.hwnd));
+    for (const hwnd of [...this.adoptedNativePopups]) {
+      if (!visible.has(hwnd)) this.adoptedNativePopups.delete(hwnd);
+    }
+    for (const hwnd of [...this.nativePopupBaseline]) {
+      if (!visible.has(hwnd)) this.nativePopupBaseline.delete(hwnd);
+    }
+  }
+
+  private async pageContaining(selector: string): Promise<Page | null> {
+    for (const page of this.listOpenPages()) {
+      if (page === this.mainPage) continue;
+      try {
+        await defaultLocatorResolver.resolve(page, selector);
+        return page;
+      } catch {
+        // This page does not have the control yet.
+      }
+    }
+    return null;
+  }
+
+  private async pageMatchingTitle(title: string): Promise<Page | null> {
+    const wanted = title.trim();
+    if (!wanted) return null;
+    for (const page of this.listOpenPages()) {
+      if (page === this.mainPage) continue;
+      const current = (await page.title().catch(() => "")).trim();
+      if (current === wanted) return page;
+    }
+    return null;
   }
 
   private listOpenPages(): Page[] {

@@ -44,4 +44,8 @@ export class UnavailableDriver implements AutomationDriver {
   nativeApp(): { pid: number; appPath: string; hwnd?: string } | null {
     return null;
   }
+
+  async useWebWindow(_selector?: string): Promise<boolean> {
+    return false;
+  }
 }
