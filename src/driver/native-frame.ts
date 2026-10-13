@@ -118,6 +118,13 @@ export function chooseNativePopup(
   return windows.find(window => window.hwnd && !baseline.has(window.hwnd) && !adopted.has(window.hwnd)) ?? null;
 }
 
+/** Popup whose title is the current page, so preview can show that window instead of the main one. */
+export function popupMatchingTitle(windows: NativePopup[], title: string): NativePopup | null {
+  const wanted = title.trim();
+  if (!wanted) return null;
+  return windows.find(window => window.title.trim() === wanted) ?? null;
+}
+
 export function imageToPage(
   layout: FrameLayout,
   x: number,

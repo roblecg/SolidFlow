@@ -8,6 +8,7 @@ import {
   captionActionFor,
   captureNativeFrame,
   chooseNativePopup,
+  popupMatchingTitle,
   isClassicDialog,
   clipRect,
   compositePageIntoFrame,
@@ -110,6 +111,13 @@ describe("native window header", () => {
     ];
     expect(isClassicDialog({ hwnd: "1", title: "Select output folder", className: "#32770" })).toBe(true);
     expect(isClassicDialog({ hwnd: "2", title: "Customer Portal", className: "Chrome_WidgetWin_1" })).toBe(false);
+    expect(popupMatchingTitle(windows, "Customer Portal")).toBeNull();
+    expect(
+      popupMatchingTitle(
+        [...windows, { hwnd: "portal", title: "Customer Portal", className: "Chrome_WidgetWin_1" }],
+        "Customer Portal"
+      )?.hwnd
+    ).toBe("portal");
     expect(chooseNativePopup(windows, baseline, adopted)?.title).toBe("Select output folder");
     adopted.add("folder");
     expect(chooseNativePopup(windows, baseline, adopted)).toBeNull();

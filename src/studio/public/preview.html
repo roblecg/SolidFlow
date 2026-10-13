@@ -18,6 +18,10 @@
         justify-content: center;
         container-type: size;
       }
+      .preview-stage .stage {
+        width: min(100cqw, calc(100cqh * var(--stage-ratio)));
+        max-height: 100cqh;
+      }
     </style>
   </head>
   <body>
@@ -68,6 +72,10 @@
           empty.textContent = snap.error || "Connect the app from SolidFlow first.";
           stage.append(empty);
           return;
+        }
+        if (snap.width > 0 && snap.height > 0) {
+          imageSize = { width: snap.width, height: snap.height };
+          stage.style.setProperty("--stage-ratio", String(snap.width / snap.height));
         }
         const img = document.createElement("img");
         img.src = snap.image;

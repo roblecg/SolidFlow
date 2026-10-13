@@ -287,6 +287,12 @@ function renderSnapshot(snap) {
     stage.append(empty);
     return;
   }
+  // Size the stage to the captured window (e.g. portrait popup) immediately so it is not
+  // letterboxed inside the default landscape --stage-ratio.
+  if (snap.width > 0 && snap.height > 0) {
+    imageSize = { width: snap.width, height: snap.height };
+    stage.style.setProperty("--stage-ratio", String(snap.width / snap.height));
+  }
   const img = document.createElement("img");
   img.src = snap.image;
   img.alt = "Device screenshot";

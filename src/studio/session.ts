@@ -12,9 +12,12 @@ import {
   hitHeader,
   hitNode,
   imageToPage,
+  listNativePopups,
   pagePixelHint,
+  popupMatchingTitle,
   presentFrame,
   type FrameLayout,
+  type NativeApp,
   type Rect
 } from "../driver/native-frame.js";
 import { fixturePageUrl } from "../util/paths.js";
@@ -277,6 +280,19 @@ async function pumpFrames(): Promise<void> {
   }
 }
 
+/** When the current page is a popup, capture that window. Otherwise keep the main window. */
+async function previewWindow(
+  native: NativeApp | null,
+  page: import("playwright-core").Page
+): Promise<NativeApp | null> {
+  if (!native || native.hwnd) return native;
+  const title = await page.title().catch(() => "");
+  const windows = await listNativePopups(native).catch(() => []);
+  const popup = popupMatchingTitle(windows, title);
+  if (!popup) return native;
+  return { ...native, hwnd: popup.hwnd };
+}
+
 async function frameOf(
   automation: AutomationDriver,
   sessionTarget: "app" | "fixture"
@@ -285,7 +301,7 @@ async function frameOf(
   const buffer = await page.screenshot({ type: "png" });
   const hint = await pagePixelHint(page);
   // The connected app from the flow's appPath, not the SolidFlow studio window.
-  const native = automation.nativeApp();
+  const native = await previewWindow(automation.nativeApp(), page);
   const [hierarchy, frame] = await Promise.all([
     captureHierarchy(page).catch(() => null),
     native ? captureNativeFrame(native, hint) : Promise.resolve(null)
