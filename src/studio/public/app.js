@@ -54,6 +54,7 @@ function yamlStep(command, selector) {
 }
 
 function insertLine(line) {
+  pushHistory("insert");
   const value = editor.value;
   const pos = editor.selectionStart ?? value.length;
   const before = value.slice(0, pos);
@@ -67,6 +68,8 @@ function insertLine(line) {
   editor.focus({ preventScroll: true });
   editor.setSelectionRange(next, next);
   revealEditorCaret(next);
+  noteCommitted();
+  updateDirty();
 }
 
 function revealEditorCaret(index) {
@@ -99,6 +102,129 @@ function revealEditorCaret(index) {
   const viewBottom = viewTop + editor.clientHeight;
   if (top < viewTop) editor.scrollTop = top;
   else if (bottom > viewBottom) editor.scrollTop = bottom - editor.clientHeight;
+}
+
+let savedContent = "";
+let history = [];
+let redo = [];
+let historyLock = false;
+let burst = null;
+let shortcutHistory = false;
+let committed = null;
+let inputNoted = false;
+
+function editorSnapshot() {
+  return {
+    value: editor.value,
+    start: editor.selectionStart ?? 0,
+    end: editor.selectionEnd ?? 0,
+    scroll: editor.scrollTop
+  };
+}
+
+function updateDirty() {
+  const dot = document.getElementById("save");
+  dot.hidden = !currentPath || editor.value === savedContent;
+}
+
+function markClean() {
+  savedContent = editor.value;
+  updateDirty();
+}
+
+function resetHistory() {
+  history = [];
+  redo = [];
+  burst = null;
+}
+
+function noteCommitted() {
+  committed = editorSnapshot();
+}
+
+function pushHistory(kind, snap = editorSnapshot()) {
+  if (historyLock) return;
+  const now = Date.now();
+  if ((kind === "type" || kind === "delete") && burst && burst.kind === kind && now < burst.until && Math.abs(snap.start - burst.caret) <= 1) {
+    burst.until = now + 450;
+    burst.caret = snap.start;
+    return;
+  }
+  const last = history[history.length - 1];
+  if (last && last.value === snap.value && last.start === snap.start && last.end === snap.end) {
+    burst = null;
+    return;
+  }
+  history.push(snap);
+  if (history.length > 300) history.shift();
+  redo = [];
+  burst = kind === "type" || kind === "delete" ? { kind, until: now + 450, caret: snap.start } : null;
+}
+
+function restoreSnapshot(snap) {
+  historyLock = true;
+  burst = null;
+  editor.value = snap.value;
+  editor.focus({ preventScroll: true });
+  const end = Math.min(snap.end, editor.value.length);
+  const start = Math.min(snap.start, end);
+  editor.setSelectionRange(start, end);
+  editor.scrollTop = snap.scroll;
+  historyLock = false;
+  noteCommitted();
+  updateDirty();
+}
+
+function undoEdit() {
+  if (!history.length) return;
+  redo.push(editorSnapshot());
+  restoreSnapshot(history.pop());
+}
+
+function redoEdit() {
+  if (!redo.length) return;
+  history.push(editorSnapshot());
+  restoreSnapshot(redo.pop());
+}
+
+function applyEditorText(next) {
+  if (next === editor.value) return false;
+  const snap = editorSnapshot();
+  pushHistory("format");
+  historyLock = true;
+  editor.value = next;
+  const caret = Math.min(snap.start, editor.value.length);
+  editor.focus({ preventScroll: true });
+  editor.setSelectionRange(caret, caret);
+  revealEditorCaret(caret);
+  historyLock = false;
+  noteCommitted();
+  updateDirty();
+  return true;
+}
+
+function formatStatus(issues, changed) {
+  if (issues.length) {
+    const preview = issues.slice(0, 2).join("; ");
+    const more = issues.length > 2 ? ` (+${issues.length - 2} more)` : "";
+    return preview + more;
+  }
+  return changed ? "Formatted" : "No spacing changes";
+}
+
+async function formatDocument() {
+  try {
+    const before = editor.value;
+    const result = await api("/api/format", {
+      method: "POST",
+      body: JSON.stringify({ content: before })
+    });
+    const changed = result.content !== before;
+    if (changed) applyEditorText(result.content);
+    setStatus(formatStatus(result.issues || [], changed), "ok");
+  } catch (err) {
+    setStatus(err.message, "bad");
+  }
 }
 
 async function loadTree() {
@@ -291,7 +417,12 @@ async function openFile(path) {
   const data = await api("/api/file?path=" + encodeURIComponent(path));
   currentPath = path;
   fileLabel.textContent = path;
+  historyLock = true;
   editor.value = data.content;
+  historyLock = false;
+  resetHistory();
+  markClean();
+  noteCommitted();
   selectedDir = parentDir(path);
   await loadTree();
 }
@@ -305,10 +436,10 @@ async function save() {
     method: "PUT",
     body: JSON.stringify({ path: currentPath, content: editor.value })
   });
-  if (result.content !== undefined) {
-    editor.value = result.content;
-  }
-  setStatus("Saved " + currentPath, "ok");
+  if (result.content !== undefined) applyEditorText(result.content);
+  markClean();
+  const issues = result.issues || [];
+  setStatus(issues.length ? `Saved ${currentPath} — ${formatStatus(issues, true)}` : `Saved ${currentPath}`, "ok");
 }
 
 function renderSnapshot(snap) {
@@ -459,6 +590,7 @@ async function setMode(next) {
 }
 
 function appendRecorded(line) {
+  pushHistory("insert");
   const value = editor.value.replace(/\s*$/, "");
   const stop = value.lastIndexOf("\n- stopApp");
   if (stop >= 0) {
@@ -466,6 +598,8 @@ function appendRecorded(line) {
   } else {
     editor.value = (value ? value + "\n" : "") + line + "\n";
   }
+  noteCommitted();
+  updateDirty();
 }
 
 async function connect() {
@@ -926,12 +1060,71 @@ logPoll = window.setInterval(() => {
   void refreshLogs();
 }, 1000);
 void refreshLogs();
-editor.addEventListener("keydown", event => {
-  if ((event.ctrlKey || event.metaKey) && event.key === "s") {
+function shortcutTarget(event) {
+  const target = event.target;
+  if (target instanceof HTMLInputElement) return false;
+  if (target instanceof HTMLTextAreaElement && target !== editor) return false;
+  return true;
+}
+
+document.addEventListener("keydown", event => {
+  if (!shortcutTarget(event) || event.isComposing) return;
+  const mod = event.ctrlKey || event.metaKey;
+  if (mod && !event.shiftKey && !event.altKey && event.code === "KeyS") {
     event.preventDefault();
     save().catch(err => setStatus(err.message, "bad"));
+    return;
+  }
+  if (!mod && event.shiftKey && event.altKey && event.code === "KeyF") {
+    if (event.repeat) return;
+    event.preventDefault();
+    formatDocument();
+    return;
+  }
+  if (mod && !event.shiftKey && !event.altKey && event.code === "KeyZ") {
+    event.preventDefault();
+    shortcutHistory = true;
+    undoEdit();
+    queueMicrotask(() => {
+      shortcutHistory = false;
+    });
+    return;
+  }
+  if (mod && (event.code === "KeyY" || (event.shiftKey && event.code === "KeyZ")) && !event.altKey) {
+    event.preventDefault();
+    shortcutHistory = true;
+    redoEdit();
+    queueMicrotask(() => {
+      shortcutHistory = false;
+    });
   }
 });
+editor.addEventListener("beforeinput", event => {
+  if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
+    event.preventDefault();
+    if (!shortcutHistory) {
+      if (event.inputType === "historyUndo") undoEdit();
+      else redoEdit();
+    }
+    inputNoted = true;
+    return;
+  }
+  inputNoted = true;
+  const kind = event.inputType && event.inputType.startsWith("delete")
+    ? "delete"
+    : event.inputType === "insertText" || event.inputType === "insertLineBreak" || event.inputType === "insertCompositionText"
+      ? "type"
+      : "edit";
+  pushHistory(kind);
+});
+editor.addEventListener("input", () => {
+  if (historyLock) return;
+  if (!inputNoted && committed && committed.value !== editor.value) pushHistory("edit", committed);
+  inputNoted = false;
+  noteCommitted();
+  updateDirty();
+});
+noteCommitted();
 document.addEventListener("click", event => {
   if (!menu.contains(event.target)) hideMenu();
 });
@@ -1166,7 +1359,12 @@ async function confirmFolder() {
     button.title = workspaceState.path;
     button.setAttribute("aria-label", "Select workspace, " + workspaceState.path);
     currentPath = "";
+    historyLock = true;
     editor.value = "";
+    historyLock = false;
+    resetHistory();
+    markClean();
+    noteCommitted();
     fileLabel.textContent = "No file";
     expanded = null;
     selectedDir = "";

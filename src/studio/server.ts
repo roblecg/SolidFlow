@@ -16,7 +16,7 @@ import {
 } from "./logs.js";
 import { resolveAppPath } from "../config.js";
 import { listCommands } from "../flow/commands.js";
-import { formatFlowContent } from "../flow/format.js";
+import { describeFormatIssue, formatFlowContent, formatFlowDocument } from "../flow/format.js";
 import { parseFlowContent, parseFlowFile } from "../flow/parser.js";
 import { runFlowFile, type DriverSlot } from "../flow/runner.js";
 import type { FlowSection } from "../types.js";
@@ -183,8 +183,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     let content = body.content;
+    let issues: string[] = [];
     try {
-      content = formatFlowContent(content);
+      const formatted = formatFlowDocument(content);
+      content = formatted.content;
+      issues = formatted.issues.map(describeFormatIssue);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       sendJson(res, 400, { error: `Format failed: ${message}` });
@@ -192,7 +195,25 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
     await writeFlow(body.path, content);
     appLog("info", `Saved flow ${body.path}`);
-    sendJson(res, 200, { ok: true, content });
+    sendJson(res, 200, { ok: true, content, issues });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/format") {
+    const body = await readBody<{ content?: string }>(req);
+    if (body.content === undefined) {
+      sendJson(res, 400, { error: "content is required" });
+      return;
+    }
+    try {
+      const formatted = formatFlowDocument(body.content);
+      sendJson(res, 200, {
+        content: formatted.content,
+        issues: formatted.issues.map(describeFormatIssue)
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, 400, { error: `Format failed: ${message}` });
+    }
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/file") {
