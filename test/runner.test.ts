@@ -7,13 +7,14 @@ import { runFlowFile } from "../src/flow/runner.js";
 import { parseFlowContent, parseFlowFile } from "../src/flow/parser.js";
 import { packageRoot } from "../src/util/paths.js";
 
-describe("fixture flow", () => {
-  const fixtureDir = join(packageRoot(), "test/fixture");
-  const smokePath = join(fixtureDir, "smoke.yaml");
+describe("local page flow", () => {
+  const pagesDir = join(packageRoot(), "test/pages");
+  const smokePath = join(pagesDir, "smoke.yaml");
+  const loginUrl = pathToFileURL(join(pagesDir, "login.html")).href;
 
   it("parses smoke flow", () => {
     const flow = parseFlowFile(smokePath);
-    expect(flow.appId).toBe("fixture.demo");
+    expect(flow.appId).toBe("page.demo");
     expect(flow.steps.length).toBeGreaterThan(3);
     expect(flow.sections).toEqual([
       expect.objectContaining({
@@ -26,7 +27,7 @@ describe("fixture flow", () => {
   });
 
   it("parses named sections in order", () => {
-    const flow = parseFlowContent(`appId: fixture.demo
+    const flow = parseFlowContent(`appId: page.demo
 ---
 - section:
     number: 2
@@ -63,7 +64,8 @@ describe("fixture flow", () => {
       const report = await runFlowFile(smokePath, {
         reportDir,
         headless: true,
-        cwd: fixtureDir
+        cwd: pagesDir,
+        pageUrl: loginUrl
       });
       expect(report.status).toBe("passed");
       expect(existsSync(join(report.reportDir, "report.html"))).toBe(true);
@@ -73,7 +75,7 @@ describe("fixture flow", () => {
         steps: unknown[];
       };
       expect(json.steps.length).toBe(report.steps.length);
-      expect(report.reportDir.replace(/\\/g, "/")).toMatch(/\/\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_fixture-smoke$/);
+      expect(report.reportDir.replace(/\\/g, "/")).toMatch(/\/\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_page-smoke$/);
     } finally {
       rmSync(reportDir, { recursive: true, force: true });
     }
@@ -82,10 +84,11 @@ describe("fixture flow", () => {
   it("runs the maestro command coverage flow", async () => {
     const reportDir = mkdtempSync(join(tmpdir(), "solidflow-results-"));
     try {
-      const report = await runFlowFile(join(fixtureDir, "commands.yaml"), {
+      const report = await runFlowFile(join(pagesDir, "commands.yaml"), {
         reportDir,
         headless: true,
-        cwd: fixtureDir
+        cwd: pagesDir,
+        pageUrl: loginUrl
       });
       expect(report.status).toBe("passed");
     } finally {
@@ -96,11 +99,11 @@ describe("fixture flow", () => {
   it("follows a popup window and returns to the original page", async () => {
     const reportDir = mkdtempSync(join(tmpdir(), "solidflow-results-"));
     try {
-      const report = await runFlowFile(join(fixtureDir, "popup.yaml"), {
+      const report = await runFlowFile(join(pagesDir, "popup.yaml"), {
         reportDir,
         headless: true,
-        cwd: fixtureDir,
-        env: { FIXTURE_URL: pathToFileURL(join(fixtureDir, "popup-host.html")).href }
+        cwd: pagesDir,
+        pageUrl: pathToFileURL(join(pagesDir, "popup-host.html")).href
       });
       expect(report.status).toBe("passed");
     } finally {

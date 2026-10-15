@@ -28,7 +28,7 @@ export async function writeRecorderEditor(
   <textarea id="yaml" readonly></textarea>
   <script>
     const initial = ${stepsJson};
-    const appHeader = ${JSON.stringify(yamlPreview.split("\\n")[0] ?? "appId: fixture.demo")};
+    const appHeader = ${JSON.stringify(yamlPreview.split("\\n")[0] ?? "appId: recorded")};
     const list = document.getElementById("steps");
     const yaml = document.getElementById("yaml");
     let steps = initial.slice();

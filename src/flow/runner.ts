@@ -25,7 +25,6 @@ import { createDriver, inferDriver } from "../driver/registry.js";
 import { defaultLocatorResolver } from "../driver/locator.js";
 import type { AutomationDriver } from "../driver/types.js";
 import { loadConfigFromAncestors, resolveAppPath, shellAllowed } from "../config.js";
-import { fixturePageUrl } from "../util/paths.js";
 import { interpolateEnv } from "../util/ids.js";
 import { uniqueRunFolder } from "../report/run-folder.js";
 import { reportRoot as workspaceReportRoot } from "../studio/workspace.js";
@@ -67,6 +66,8 @@ export type DriverSlot = { current: AutomationDriver | null };
 export type RunnerOptions = RunOptions & {
   keepDriver?: boolean;
   driverSlot?: DriverSlot;
+  /** Chromium start page. Desktop flows launch appPath instead. */
+  pageUrl?: string;
   /** When aborted, finish the current step then stop before the next one. */
   signal?: AbortSignal;
   onStep?: (event: {
@@ -136,13 +137,10 @@ async function runFlowOnce(
     ...(options.env ?? {})
   };
 
-  const driverKind = inferDriver(flow.appId, flow.driver);
+  const driverKind = inferDriver(flow.driver);
   const config = loadConfigFromAncestors(options.cwd ?? process.cwd());
   const appPath = flow.appPath || configAppPath || resolveAppPath(config);
-  let fixtureUrl = env.FIXTURE_URL ?? process.env.SOLIDFLOW_FIXTURE_URL;
-  if (driverKind === "chromium" && !fixtureUrl && flow.appId === "fixture.demo") {
-    fixtureUrl = fixturePageUrl();
-  }
+  const pageUrl = options.pageUrl;
 
   const state: ExecState = {
     driver: options.driverSlot?.current ?? null,
@@ -199,7 +197,7 @@ async function runFlowOnce(
           await executeStep(step, state, flow, {
             appPath,
             driverKind,
-            fixtureUrl,
+            pageUrl,
             locale: flow.locale ?? "en",
             headless: options.headless,
             screenshotDir,
@@ -314,7 +312,7 @@ async function runFlowOnce(
 type StepCtx = {
   appPath?: string;
   driverKind: import("../types.js").DriverKind;
-  fixtureUrl?: string;
+  pageUrl?: string;
   locale: string;
   headless?: boolean;
   screenshotDir: string;
@@ -888,7 +886,7 @@ async function ensureDriver(state: ExecState, flow: FlowDocument, ctx: StepCtx):
     appId: flow.appId,
     locale: ctx.locale,
     appPath: ctx.appPath,
-    fixtureUrl: ctx.fixtureUrl,
+    pageUrl: ctx.pageUrl,
     headless: ctx.headless,
     screenshotDir: ctx.screenshotDir,
     userDataDir: state.userDataDir

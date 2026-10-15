@@ -73,7 +73,7 @@ describe("flow sections", () => {
 
   it("wraps a section-less flow as Unassigned", () => {
     const flow = parseFlowContent(
-      "appId: fixture.demo\n---\n- launchApp\n- tapOn: Continue\n"
+      "appId: demo.app\n---\n- launchApp\n- tapOn: Continue\n"
     );
     expect(flow.sections).toHaveLength(1);
     expect(flow.sections![0]).toMatchObject({

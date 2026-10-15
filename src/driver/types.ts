@@ -5,7 +5,8 @@ export type DriverContext = {
   appId: string;
   locale: string;
   appPath?: string;
-  fixtureUrl?: string;
+  /** Page Chromium opens. Desktop flows use appPath instead. */
+  pageUrl?: string;
   headless?: boolean;
   viewport?: { width: number; height: number };
   userDataDir?: string;

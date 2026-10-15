@@ -1,4 +1,4 @@
-appId: fixture.demo
+appId: page.demo
 name: Popup window
 driver: chromium
 locale: en

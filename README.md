@@ -98,8 +98,6 @@ tags: [smoke, login]
 - stopApp
 ```
 
-Fixture flows use `driver: chromium` and `appId: fixture.demo`.
-
 ## Reports
 
 Each run writes a folder under the workspace `test-results` directory. The folder name is the local time and the flow name, for example `2026-09-25_19-23-05_login-validation`. A second run in the same second gets `_2` on the end.
@@ -115,7 +113,7 @@ Inside that folder:
 pnpm test
 ```
 
-Chromium fixture tests run without the Tauri binary. They use the practice login page shipped with SolidFlow, not a workspace inside the application folder.
+`pnpm test` runs without a desktop app. Those tests drive local HTML pages under `test/pages` with Chromium.
 
 ## License
 

@@ -364,18 +364,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/session") {
-    const body = await readBody<{ target?: "app" | "fixture"; path?: string; content?: string }>(req);
-    const next = body.target === "fixture" ? "fixture" : "app";
-    let flowAppPath: string | undefined;
-    if (next === "app") {
-      if (!body.content?.trim()) {
-        sendJson(res, 400, { error: "Open a flow and set appPath to the exe you want to connect." });
-        return;
-      }
-      flowAppPath = parseFlowContent(body.content, body.path || "flow").appPath;
+    const body = await readBody<{ path?: string; content?: string }>(req);
+    if (!body.content?.trim()) {
+      sendJson(res, 400, { error: "Open a flow and set appPath to the exe you want to connect." });
+      return;
     }
-    await startSession(next, flowAppPath);
-    appLog("info", `Connected ${next} session`);
+    const flowAppPath = parseFlowContent(body.content, body.path || "flow").appPath;
+    await startSession(flowAppPath);
+    appLog("info", "Connected app session");
     sendJson(res, 200, await snapshot());
     return;
   }

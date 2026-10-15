@@ -20,7 +20,6 @@ import {
   type NativeApp,
   type Rect
 } from "../driver/native-frame.js";
-import { fixturePageUrl } from "../util/paths.js";
 import { reportRoot, workspaceConfig } from "./workspace.js";
 import { formatRecordedStep, RECORDER_INIT_SCRIPT, type RecordedStep } from "../recorder/script.js";
 
@@ -33,7 +32,7 @@ export type StudioNode = {
 
 export type StudioSnapshot = {
   connected: boolean;
-  target: "app" | "fixture" | null;
+  target: "app" | null;
   image?: string;
   width?: number;
   height?: number;
@@ -44,7 +43,7 @@ export type StudioSnapshot = {
 };
 
 let driver: AutomationDriver | null = null;
-let target: "app" | "fixture" | null = null;
+let target: "app" | null = null;
 let previewHold: StudioSnapshot | null = null;
 let previewSeq = 0;
 let lastLayout: FrameLayout | null = null;
@@ -55,39 +54,27 @@ let frameWaiters: Array<{
   reject: (error: unknown) => void;
 }> = [];
 
-export function sessionTarget(): "app" | "fixture" | null {
+export function sessionTarget(): "app" | null {
   return target;
 }
 
-export async function startSession(next: "app" | "fixture", flowAppPath?: string): Promise<void> {
+export async function startSession(flowAppPath?: string): Promise<void> {
   await stopSession();
   const config = workspaceConfig();
   const screenshotDir = join(reportRoot(), "studio");
-  if (next === "app") {
-    const appPath = flowAppPath || resolveAppPath(config);
-    if (!appPath) {
-      throw new Error("Set appPath in the flow to the exe you want to connect.");
-    }
-    driver = createDriver("webview2");
-    await driver.connect({
-      appId: basename(appPath),
-      locale: "en",
-      appPath,
-      headless: false,
-      screenshotDir
-    });
-  } else {
-    driver = createDriver("chromium");
-    await driver.connect({
-      appId: "fixture.demo",
-      locale: "en",
-      fixtureUrl: fixturePageUrl(),
-      headless: false,
-      viewport: { width: 420, height: 720 },
-      screenshotDir
-    });
+  const appPath = flowAppPath || resolveAppPath(config);
+  if (!appPath) {
+    throw new Error("Set appPath in the flow to the exe you want to connect.");
   }
-  target = next;
+  driver = createDriver("webview2");
+  await driver.connect({
+    appId: basename(appPath),
+    locale: "en",
+    appPath,
+    headless: false,
+    screenshotDir
+  });
+  target = "app";
   const page = driver.getPage();
   await page.addInitScript(RECORDER_INIT_SCRIPT).catch(() => {});
   await page.evaluate(RECORDER_INIT_SCRIPT).catch(() => {});
@@ -106,9 +93,7 @@ export function adoptDriver(next: AutomationDriver | null): void {
     target = null;
     return;
   }
-  if (!target) {
-    target = next.kind === "chromium" ? "fixture" : "app";
-  }
+  if (!target) target = "app";
 }
 
 export function chooseSelector(input: {
@@ -221,7 +206,7 @@ export function clearRunPreview(): void {
 export async function publishRunPreview(automation: AutomationDriver): Promise<void> {
   try {
     const frame = await shareFrame(() =>
-      frameOf(automation, target ?? (automation.kind === "chromium" ? "fixture" : "app"))
+      frameOf(automation, target ?? "app")
     );
     previewSeq += 1;
     previewHold = { ...frame, seq: previewSeq };
@@ -295,7 +280,7 @@ async function previewWindow(
 
 async function frameOf(
   automation: AutomationDriver,
-  sessionTarget: "app" | "fixture"
+  sessionTarget: "app"
 ): Promise<StudioSnapshot> {
   const page = automation.getPage();
   const buffer = await page.screenshot({ type: "png" });

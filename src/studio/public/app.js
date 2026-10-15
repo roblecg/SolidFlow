@@ -283,7 +283,7 @@ function renderSnapshot(snap) {
     stage.style.removeProperty("--stage-ratio");
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = snap.error || "Connect the CIM app or the fixture to pick elements.";
+    empty.textContent = snap.error || "Connect the app, then click a control in this preview to insert a YAML command.";
     stage.append(empty);
     return;
   }
@@ -433,19 +433,17 @@ function appendRecorded(line) {
   }
 }
 
-async function connect(target) {
-  setStatus("Connecting " + target + "…");
+async function connect() {
+  setStatus("Connecting app…");
   try {
-    const body = { target };
-    if (target === "app") {
-      if (!currentPath) {
-        setStatus("Open a flow and set appPath to the exe.", "bad");
-        return;
-      }
-      body.path = currentPath;
-      body.content = editor.value;
+    if (!currentPath) {
+      setStatus("Open a flow and set appPath to the exe.", "bad");
+      return;
     }
-    await api("/api/session", { method: "POST", body: JSON.stringify(body) });
+    await api("/api/session", {
+      method: "POST",
+      body: JSON.stringify({ path: currentPath, content: editor.value })
+    });
     await setMode(mode);
     if (mode === "inspect") {
       const snap = await api("/api/session");
@@ -493,8 +491,7 @@ channel.onmessage = event => {
     if (event.data.run) document.getElementById("run").click();
   }
 };
-document.getElementById("connect-app").onclick = () => connect("app");
-document.getElementById("connect-fixture").onclick = () => connect("fixture");
+document.getElementById("connect-app").onclick = () => connect();
 document.getElementById("disconnect").onclick = async () => {
   window.clearInterval(poll);
   await api("/api/session", { method: "DELETE" });
