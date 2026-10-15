@@ -60,10 +60,45 @@ function insertLine(line) {
   const after = value.slice(pos);
   const prefix = before.endsWith("\n") || before.length === 0 ? "" : "\n";
   const suffix = after.startsWith("\n") || after.length === 0 ? "\n" : "\n";
-  editor.value = before + prefix + line + suffix + after;
   const next = (before + prefix + line).length;
-  editor.focus();
+  editor.value = before + prefix + line + suffix + after;
+  // Assigning value parks the caret at the end. Focusing first would scroll
+  // that caret into view, so the editor jumps to the last line.
+  editor.focus({ preventScroll: true });
   editor.setSelectionRange(next, next);
+  revealEditorCaret(next);
+}
+
+function revealEditorCaret(index) {
+  const style = getComputedStyle(editor);
+  const lineHeight = parseFloat(style.lineHeight) || editor.scrollHeight / Math.max(1, editor.value.split("\n").length);
+  const mirror = document.createElement("div");
+  mirror.setAttribute("aria-hidden", "true");
+  mirror.style.cssText = "position:absolute;visibility:hidden;left:0;top:0;white-space:pre-wrap;overflow-wrap:break-word;overflow:hidden;pointer-events:none";
+  mirror.style.boxSizing = style.boxSizing;
+  mirror.style.width = editor.clientWidth + "px";
+  mirror.style.padding = style.padding;
+  mirror.style.borderTopWidth = style.borderTopWidth;
+  mirror.style.borderRightWidth = style.borderRightWidth;
+  mirror.style.borderBottomWidth = style.borderBottomWidth;
+  mirror.style.borderLeftWidth = style.borderLeftWidth;
+  mirror.style.borderStyle = "solid";
+  mirror.style.font = style.font;
+  mirror.style.lineHeight = style.lineHeight;
+  mirror.style.letterSpacing = style.letterSpacing;
+  mirror.style.tabSize = style.tabSize;
+  mirror.textContent = editor.value.slice(0, index);
+  const mark = document.createElement("span");
+  mark.textContent = ".";
+  mirror.append(mark);
+  document.body.append(mirror);
+  const top = mark.offsetTop;
+  mirror.remove();
+  const bottom = top + lineHeight;
+  const viewTop = editor.scrollTop;
+  const viewBottom = viewTop + editor.clientHeight;
+  if (top < viewTop) editor.scrollTop = top;
+  else if (bottom > viewBottom) editor.scrollTop = bottom - editor.clientHeight;
 }
 
 async function loadTree() {
