@@ -234,7 +234,8 @@ export function formatStepLabel(command: string): string {
     const text = value.slice(splitAt + 1);
     return `Input text "${text}" into ${target}`;
   }
-  if (value.startsWith("role:option/")) return `${verb} "${value.slice("role:option/".length)}"`;
+  const namedRole = /^role:(?:option|radio|checkbox|switch)\/([\s\S]+)$/.exec(value);
+  if (namedRole) return `${verb} "${namedRole[1]}"`;
   const windowControl = windowControlLabel(value);
   if (windowControl) return `${verb} ${windowControl}`;
   if (name === "tapOn" && /^[\w.-]+$/.test(value)) return `Tap on id: ${value}`;

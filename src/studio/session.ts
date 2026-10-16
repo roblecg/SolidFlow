@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import type { AutomationDriver } from "../driver/types.js";
 import { createDriver } from "../driver/registry.js";
 import { resolveAppPath } from "../config.js";
+import { DOM_TARGET_SOURCE } from "../inspector/dom-target.js";
 import { captureHierarchy, type HierarchyNode } from "../inspector/hierarchy.js";
 import {
   captureNativeFrame,
@@ -28,6 +29,8 @@ export type StudioNode = {
   selector: string;
   label: string;
   bounds: { x: number; y: number; width: number; height: number };
+  /** Button, field, link, choice, or the visible dot of a custom radio. */
+  control?: boolean;
 };
 
 export type StudioSnapshot = {
@@ -96,6 +99,11 @@ export function adoptDriver(next: AutomationDriver | null): void {
   if (!target) target = "app";
 }
 
+function oneLine(value: string): string {
+  const line = value.trim().split(/\n/)[0] ?? "";
+  return line.replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
 export function chooseSelector(input: {
   role: string;
   id: string;
@@ -104,11 +112,19 @@ export function chooseSelector(input: {
   text: string;
 }): string {
   const generatedId = !input.id || /^cl-/.test(input.id) || /-option-\d+$/.test(input.id);
-  if (input.role === "option" && input.text) return `role:option/${input.text}`;
+  const text = oneLine(input.text);
+  const name = oneLine(input.name);
+  if (input.role === "option" && text) return `role:option/${text}`;
   if (input.testId) return input.testId;
   if (!generatedId) return input.id;
-  if (input.name) return input.name;
-  return input.text;
+  if (
+    (input.role === "radio" || input.role === "checkbox" || input.role === "switch") &&
+    (name || text)
+  ) {
+    return `role:${input.role}/${name || text}`;
+  }
+  if (name) return name;
+  return text;
 }
 
 export async function pickAt(nx: number, ny: number): Promise<StudioNode | null> {
@@ -138,30 +154,9 @@ export async function pickAt(nx: number, ny: number): Promise<StudioNode | null>
     cssY = yNorm * (hint?.cssHeight ?? 1);
   }
   const picked = await page.evaluate(`(() => {
+${DOM_TARGET_SOURCE}
     const el = document.elementFromPoint(${cssPoint(cssX)}, ${cssPoint(cssY)});
-    if (!el || el.id === "__solidFlow_step" || el.id === "__solidFlow_ring") return null;
-    const interesting = el.closest("[role='option'], button, a, input, select, textarea, label, [data-testid]");
-    const node = interesting || el;
-    const rect = node.getBoundingClientRect();
-    const role = node.getAttribute("role") || "";
-    const id = node.id || "";
-    const testId = node.getAttribute("data-testid") || "";
-    const name = node.getAttribute("aria-label") || "";
-    const text = (node.innerText || node.textContent || "").trim().split("\\n")[0].slice(0, 80);
-    const generatedId = !id || /^cl-/.test(id) || /-option-\\d+$/.test(id);
-    let selector = "";
-    if (role === "option" && text) selector = "role:option/" + text;
-    else if (testId) selector = testId;
-    else if (!generatedId) selector = id;
-    else if (name) selector = name;
-    else selector = text;
-    if (!selector) return null;
-    return {
-      tag: node.tagName.toLowerCase(),
-      selector,
-      label: name || text || selector,
-      bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
-    };
+    return solidFlowResolve(el);
   })()`);
   return (picked as StudioNode | null) ?? null;
 }
@@ -319,7 +314,12 @@ async function frameOf(
     hierarchy && !layout?.popup
       ? flatten(hierarchy, scaleX, scaleY, layout?.client.x ?? 0, layout?.client.y ?? 0, layout?.client ?? null)
       : [];
-  if (layout) nodes.push(...headerNodes(layout), ...layout.controls);
+  if (layout) {
+    nodes.push(
+      ...headerNodes(layout).map(node => ({ ...node, control: true })),
+      ...layout.controls.map(node => ({ ...node, control: true }))
+    );
+  }
   const size = layout ?? pageSize;
   return {
     connected: true,
@@ -366,7 +366,8 @@ function flatten(
         tag: node.tag,
         selector,
         label: node.name || node.text || node.id || node.testId || node.tag,
-        bounds
+        bounds,
+        ...(node.control ? { control: true } : {})
       });
     }
   }

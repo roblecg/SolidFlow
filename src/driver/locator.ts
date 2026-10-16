@@ -30,8 +30,9 @@ const STRATEGIES: Array<{
       if (roleMatch) {
         const role = roleMatch[1]!;
         const name = roleMatch[2];
+        const exact = role !== "radio" && role !== "checkbox" && role !== "switch";
         return name
-          ? page.getByRole(role as Parameters<Page["getByRole"]>[0], { name, exact: true })
+          ? page.getByRole(role as Parameters<Page["getByRole"]>[0], { name, exact })
           : page.getByRole(role as Parameters<Page["getByRole"]>[0]);
       }
       return page.getByRole("button", { name: q, exact: true });

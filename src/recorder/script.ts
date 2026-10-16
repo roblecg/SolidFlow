@@ -1,8 +1,11 @@
+import { DOM_TARGET_SOURCE } from "../inspector/dom-target.js";
+
 /** Injected into the live app. Clicks and typing become SolidFlow steps. */
 export const RECORDER_INIT_SCRIPT = `
 (() => {
   if (window.__solidFlowRecorder && window.__solidFlowRecorder.installed) return;
   window.__solidFlowRecorder = { steps: [], paused: true, installed: true };
+${DOM_TARGET_SOURCE}
   const push = (command, selector) => {
     const rec = window.__solidFlowRecorder;
     if (!rec || rec.paused || !selector) return;
@@ -15,19 +18,8 @@ export const RECORDER_INIT_SCRIPT = `
     rec.steps.push(step);
   };
   const describe = (el) => {
-    if (!el || el.id === "__solidFlow_step" || el.id === "__solidFlow_ring") return "";
-    const node = el.closest("[role='option'], button, a, input, select, textarea, label, [data-testid]") || el;
-    const role = node.getAttribute("role") || "";
-    const id = node.id || "";
-    const testId = node.getAttribute("data-testid") || "";
-    const name = node.getAttribute("aria-label") || "";
-    const text = (node.innerText || node.textContent || "").trim().split("\\n")[0].slice(0, 80);
-    const generatedId = !id || /^cl-/.test(id) || /-option-\\d+$/.test(id);
-    if (role === "option" && text) return "role:option/" + text;
-    if (testId) return testId;
-    if (!generatedId) return id;
-    if (name) return name;
-    return text;
+    const resolved = solidFlowResolve(el);
+    return resolved && resolved.selector ? resolved.selector : "";
   };
   document.addEventListener("click", (event) => {
     const target = event.target;

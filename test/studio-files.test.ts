@@ -50,6 +50,9 @@ describe("studio files", () => {
     expect(formatStepLabel('tapOn: "window:close"')).toBe("Tap on Close");
     expect(formatStepLabel('doubleTapOn: "window:title"')).toBe("Double tap the window title bar");
     expect(formatStepLabel('tapOn: "login-region"')).toBe("Tap on id: login-region");
+    expect(formatStepLabel('tapOn: "role:radio/Keep folder hierarchy"')).toBe(
+      'Tap on "Keep folder hierarchy"'
+    );
     expect(formatStepLabel('inputText: "login-tenantId|kddadev6"')).toBe(
       'Input text "kddadev6" into login-tenantId'
     );
@@ -88,6 +91,42 @@ describe("studio files", () => {
         text: "Region"
       })
     ).toBe("login-region");
+    expect(
+      chooseSelector({
+        role: "radio",
+        id: "",
+        testId: "",
+        name: "",
+        text: "Keep folder hierarchy"
+      })
+    ).toBe("role:radio/Keep folder hierarchy");
+    expect(
+      chooseSelector({
+        role: "radio",
+        id: "download-mode",
+        testId: "",
+        name: "",
+        text: "Keep folder hierarchy"
+      })
+    ).toBe("download-mode");
+    expect(
+      chooseSelector({
+        role: "checkbox",
+        id: "cl-9",
+        testId: "",
+        name: "Select all",
+        text: ""
+      })
+    ).toBe("role:checkbox/Select all");
+    expect(
+      chooseSelector({
+        role: "button",
+        id: "",
+        testId: "",
+        name: "",
+        text: "Advanced settings"
+      })
+    ).toBe("Advanced settings");
   });
 
   it("keeps flow paths inside the workspace", () => {

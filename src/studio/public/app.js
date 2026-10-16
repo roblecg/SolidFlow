@@ -475,54 +475,35 @@ function renderSnapshot(snap) {
     void pickElement(nx, ny, event.clientX, event.clientY);
   });
   stage.append(img);
-  const box = document.createElement("div");
-  box.className = "highlight";
-  box.hidden = true;
+  const box = solidFlowCreateHighlight();
   stage.append(box);
   img.onmousemove = event => {
     const rect = img.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * (imageSize.width || rect.width);
     const y = ((event.clientY - rect.top) / rect.height) * (imageSize.height || rect.height);
-    const hit = hitTest(x, y);
-    if (!hit) {
-      box.hidden = true;
-      return;
-    }
-    const scaleX = rect.width / (imageSize.width || rect.width);
-    const scaleY = rect.height / (imageSize.height || rect.height);
-    box.hidden = false;
-    box.style.left = hit.bounds.x * scaleX + "px";
-    box.style.top = hit.bounds.y * scaleY + "px";
-    box.style.width = hit.bounds.width * scaleX + "px";
-    box.style.height = hit.bounds.height * scaleY + "px";
+    solidFlowPlaceHighlight(box, hitTest(x, y), imageSize, rect);
   };
 }
 
 function hitTest(x, y) {
-  const hits = nodes.filter(node => {
-    const b = node.bounds;
-    return x >= b.x && y >= b.y && x <= b.x + b.width && y <= b.y + b.height;
-  });
-  hits.sort((a, b) => a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height);
-  return hits[0] || null;
+  return solidFlowHitTest(nodes, x, y, imageSize);
 }
 
 async function pickElement(nx, ny, clientX, clientY) {
   window.clearInterval(poll);
   poll = 0;
-  setStatus("Looking up element…");
+  const local = hitTest(nx * (imageSize.width || 1), ny * (imageSize.height || 1));
   try {
-    const hit = await api("/api/pick", {
-      method: "POST",
-      body: JSON.stringify({ nx, ny })
-    });
-    if (!hit.selector) {
-      setStatus("No element under the pointer. Click a button or field.", "bad");
+    const hit = local && local.selector
+      ? local
+      : await api("/api/pick", { method: "POST", body: JSON.stringify({ nx, ny }) });
+    if (!hit || !hit.selector) {
+      setStatus("No element under the pointer. Click a button, field, or radio.", "bad");
       return;
     }
     selected = hit;
-    showMenu(clientX, clientY, hit);
     setStatus("Choose a command for " + (hit.label || hit.selector), "ok");
+    await showMenu(clientX, clientY, hit);
   } catch (err) {
     setStatus(err.message, "bad");
   } finally {
@@ -532,7 +513,7 @@ async function pickElement(nx, ny, clientX, clientY) {
 
 function showMenu(x, y, node) {
   selected = node;
-  void window.SolidFlowMenu.open(menu, x, y, {
+  return window.SolidFlowMenu.open(menu, x, y, {
     selector: node.selector,
     label: node.label,
     onInsert: yaml => {
