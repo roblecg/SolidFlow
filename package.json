@@ -16,6 +16,7 @@
     "studio": "dotnet build desktop/SolidFlow.csproj -c Release -o bin/app && bin\\app\\SolidFlow.exe",
     "studio:web": "tsx src/cli.ts studio",
     "app": "dotnet build desktop/SolidFlow.csproj -c Release -o bin/app && bin\\app\\SolidFlow.exe",
+    "package:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-win.ps1",
     "oss": "node scripts/oss-check.mjs",
     "lint": "tsc --noEmit"
   },

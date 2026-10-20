@@ -224,6 +224,12 @@ function acceptedWorkspace(dir: string | undefined): string | null {
 function isAppDirectory(dir: string): boolean {
   const root = normalizePath(packageRoot());
   const abs = normalizePath(dir);
+  if (sameOrChild(abs, root)) return true;
+  const install = normalizePath(join(packageRoot(), ".."));
+  return existsSync(join(packageRoot(), "..", "SolidFlow.exe")) && sameOrChild(abs, install);
+}
+
+function sameOrChild(abs: string, root: string): boolean {
   return abs === root || abs.startsWith(`${root}\\`) || abs.startsWith(`${root}/`);
 }
 
