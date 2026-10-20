@@ -390,8 +390,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       sendJson(res, 400, { error: "Open a flow and set appPath to the exe you want to connect." });
       return;
     }
-    const flowAppPath = parseFlowContent(body.content, body.path || "flow").appPath;
-    await startSession(flowAppPath);
+    const flow = parseFlowContent(body.content, body.path || "flow");
+    await startSession(flow.appPath, flow.driver);
     appLog("info", "Connected app session");
     sendJson(res, 200, await snapshot());
     return;

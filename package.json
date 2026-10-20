@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "SolidFlow desktop E2E runner with WebView2 CDP driver",
+  "description": "SolidFlow desktop E2E runner with WebView2 and Electron CDP drivers",
   "bin": {
     "solidFlow": "./dist/cli.js"
   },

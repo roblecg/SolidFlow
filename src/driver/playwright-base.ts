@@ -207,7 +207,11 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     if (this.ctx?.locale) {
       await context.addInitScript(localeInitScript(this.ctx.locale));
     }
-    this.page = context.pages()[0] ?? (await context.newPage());
+    this.usePage(context.pages()[0] ?? (await context.newPage()));
+  }
+
+  protected usePage(page: Page): void {
+    this.page = page;
     this.rememberMainPage();
   }
 

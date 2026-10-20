@@ -137,9 +137,9 @@ async function runFlowOnce(
     ...(options.env ?? {})
   };
 
-  const driverKind = inferDriver(flow.driver);
   const config = loadConfigFromAncestors(options.cwd ?? process.cwd());
   const appPath = flow.appPath || configAppPath || resolveAppPath(config);
+  const driverKind = inferDriver(flow.driver, appPath);
   const pageUrl = options.pageUrl;
 
   const state: ExecState = {

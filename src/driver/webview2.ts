@@ -6,6 +6,7 @@ import type { DriverKind, DeviceInfo } from "../types.js";
 import type { DriverContext } from "./types.js";
 import { PlaywrightBaseDriver } from "./playwright-base.js";
 import { getFreePort } from "../util/port.js";
+import { kcpsInstallerHint } from "./electron-app.js";
 
 export class WebView2Driver extends PlaywrightBaseDriver {
   readonly kind: DriverKind = "webview2";
@@ -18,6 +19,8 @@ export class WebView2Driver extends PlaywrightBaseDriver {
     if (!ctx.appPath) {
       throw new Error("WebView2 driver requires appPath on the flow (or SOLIDFLOW_APP_PATH).");
     }
+    const installerHint = kcpsInstallerHint(ctx.appPath);
+    if (installerHint) throw new Error(installerHint);
     this.debugPort = await getFreePort();
     this.userDataDir =
       ctx.userDataDir ?? (await mkdtemp(join(tmpdir(), "solidFlow-wv2-")));

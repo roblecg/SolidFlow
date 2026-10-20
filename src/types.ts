@@ -1,4 +1,4 @@
-export type DriverKind = "webview2" | "chromium" | "android" | "ios" | "browser";
+export type DriverKind = "webview2" | "chromium" | "electron" | "android" | "ios" | "browser";
 
 export type FlowDocument = {
   appId: string;

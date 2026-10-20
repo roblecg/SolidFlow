@@ -1,7 +1,8 @@
 import { PNG } from "pngjs";
 import { basename, join } from "node:path";
 import type { AutomationDriver } from "../driver/types.js";
-import { createDriver } from "../driver/registry.js";
+import { createDriver, inferDriver } from "../driver/registry.js";
+import type { DriverKind } from "../types.js";
 import { resolveAppPath } from "../config.js";
 import { DOM_TARGET_SOURCE } from "../inspector/dom-target.js";
 import { captureHierarchy, type HierarchyNode } from "../inspector/hierarchy.js";
@@ -61,7 +62,7 @@ export function sessionTarget(): "app" | null {
   return target;
 }
 
-export async function startSession(flowAppPath?: string): Promise<void> {
+export async function startSession(flowAppPath?: string, flowDriver?: DriverKind): Promise<void> {
   await stopSession();
   const config = workspaceConfig();
   const screenshotDir = join(reportRoot(), "studio");
@@ -69,7 +70,7 @@ export async function startSession(flowAppPath?: string): Promise<void> {
   if (!appPath) {
     throw new Error("Set appPath in the flow to the exe you want to connect.");
   }
-  driver = createDriver("webview2");
+  driver = createDriver(inferDriver(flowDriver, appPath));
   await driver.connect({
     appId: basename(appPath),
     locale: "en",

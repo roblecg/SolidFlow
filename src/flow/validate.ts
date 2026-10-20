@@ -1,6 +1,6 @@
 import type { FlowDocument } from "../types.js";
 
-const ALLOWED_DRIVERS = new Set(["webview2", "chromium", "android", "ios", "browser"]);
+const ALLOWED_DRIVERS = new Set(["webview2", "chromium", "electron", "android", "ios", "browser"]);
 
 export function validateFlowMeta(flow: FlowDocument): { valid: boolean; errors: string[] } {
   const errors: string[] = [];

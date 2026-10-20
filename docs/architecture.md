@@ -14,17 +14,21 @@ flowchart LR
     Runner[Flow Runner]
     DriverReg[Driver Registry]
     W2[WebView2Driver MVP]
+    El[ElectronDriver MVP]
     Chr[ChromiumDriver MVP]
   end
   subgraph app [App under test]
     Tauri[Tauri WebView2]
+    Kcps[Electron KCPS]
   end
   CLI --> Runner
   Studio -.-> Runner
   Runner --> DriverReg
   DriverReg --> W2
+  DriverReg --> El
   DriverReg --> Chr
   W2 --> Tauri
+  El --> Kcps
 ```
 
 ## Folder structure
@@ -142,12 +146,14 @@ classDiagram
     +assertVisible(locator)
   }
   class WebView2Driver
+  class ElectronDriver
   class ChromiumDriver
   class LocatorResolver {
     +resolve(page, query) LocatorMatch
   }
   FlowRunner --> AutomationDriver
   WebView2Driver ..|> AutomationDriver
+  ElectronDriver ..|> AutomationDriver
   ChromiumDriver ..|> AutomationDriver
   FlowRunner --> LocatorResolver
 ```
@@ -157,7 +163,7 @@ classDiagram
 ### MVP (this repo)
 
 - YAML commands listed in README
-- WebView2 + Chromium drivers
+- WebView2, Electron, and Chromium drivers
 - CLI, reports, inspector, recorder
 - CIM login validation example
 
