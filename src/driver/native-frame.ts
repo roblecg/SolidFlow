@@ -184,6 +184,17 @@ export async function pagePixelHint(page: Page): Promise<PixelHint | undefined> 
   }
 }
 
+/** Show the app window once so its title bar can be captured the same way as a Tauri window. */
+export async function revealNativeWindow(app: NativeApp): Promise<boolean> {
+  if (process.platform !== "win32" || !app.pid) return false;
+  try {
+    const response = await helperRequest({ op: "reveal", ...requestFields(app) });
+    return response?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function captureNativeFrame(app: NativeApp, hint?: PixelHint): Promise<NativeFrame | null> {
   if (process.platform !== "win32") return null;
   try {

@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import type { Page } from "playwright-core";
 import type { DriverKind, DeviceInfo } from "../types.js";
 import type { DriverContext } from "./types.js";
-import { stopNativeFrameHost } from "./native-frame.js";
+import { revealNativeWindow, stopNativeFrameHost } from "./native-frame.js";
 import { PlaywrightBaseDriver } from "./playwright-base.js";
 import { getFreePort } from "../util/port.js";
 import {
@@ -58,6 +58,7 @@ export class ElectronDriver extends PlaywrightBaseDriver {
       this.preferAppPage();
       this.ready = true;
       await this.getPage().waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
+      await this.revealMainWindow();
       await this.rememberNativePopups();
     } catch (err) {
       await this.disconnect();
@@ -103,6 +104,18 @@ export class ElectronDriver extends PlaywrightBaseDriver {
 
   profileDir(): string | undefined {
     return this.userDataDir || this.ctx?.userDataDir;
+  }
+
+  private async revealMainWindow(): Promise<void> {
+    const appPath = this.ctx?.appPath;
+    const pid = this.child?.pid ?? 0;
+    if (!appPath || !pid) return;
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      if (this.exitReason) return;
+      if (await revealNativeWindow({ pid, appPath })) return;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
   }
 
   private preferAppPage(): void {

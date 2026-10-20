@@ -96,6 +96,9 @@ namespace SolidFlow {
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr hWnd);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
@@ -149,6 +152,7 @@ namespace SolidFlow {
       op = op ?? "";
       appPath = appPath ?? "";
       if (op == "windows") return ListPopups(procId, appPath);
+      if (op == "reveal") return Reveal(procId, appPath, hintW, hintH, cssW, cssH);
       IntPtr requested = ParseHwnd(hwndText);
       bool specific = requested != IntPtr.Zero;
       if (specific && (op == "invoke" || op == "visible" || op == "value" || op == "read" || op == "caption")) {
@@ -174,6 +178,30 @@ namespace SolidFlow {
       if (op == "read") return ReadNamed(hwnd, name ?? "");
       if (op == "caption") return Caption(hwnd, action ?? "");
       return Capture(hwnd, op == "capture", popup);
+    }
+
+    static string Reveal(int procId, string appPath, int hintW, int hintH, int cssW, int cssH) {
+      IntPtr hwnd = Find(procId, appPath, hintW, hintH, cssW, cssH);
+      if (hwnd == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
+      EnsureShown(hwnd);
+      FocusWindow(hwnd);
+      return "{\"ok\":true}";
+    }
+
+    // Electron creates its window hidden and shows it later. The helper itself was started hidden,
+    // so it must not call ShowWindow: Windows would turn that first call into SW_HIDE.
+    static void EnsureShown(IntPtr hwnd) {
+      if (IsWindowVisible(hwnd)) return;
+      const int GWL_STYLE = -16;
+      const int WS_VISIBLE = 0x10000000;
+      int style = GetWindowLong(hwnd, GWL_STYLE);
+      if ((style & WS_VISIBLE) == 0) SetWindowLong(hwnd, GWL_STYLE, style | WS_VISIBLE);
+      const uint SWP_NOSIZE = 0x0001;
+      const uint SWP_NOMOVE = 0x0002;
+      const uint SWP_NOZORDER = 0x0004;
+      const uint SWP_NOACTIVATE = 0x0010;
+      const uint SWP_FRAMECHANGED = 0x0020;
+      SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
 
     static string Caption(IntPtr hwnd, string action) {
@@ -1044,7 +1072,6 @@ namespace SolidFlow {
     }
 
     static int Score(IntPtr hwnd, int procId, string appPath, int hintW, int hintH, int cssW, int cssH) {
-      if (!IsWindowVisible(hwnd)) return 0;
       if (Cloaked(hwnd)) return 0;
       if (GetWindow(hwnd, GW_OWNER) != IntPtr.Zero) return 0;
       uint windowPid;
@@ -1061,6 +1088,9 @@ namespace SolidFlow {
       int winH = win.Bottom - win.Top;
       if (winW < 80 || winH < 80) return 0;
       int score = 1;
+      // A visible window still wins. Electron keeps the real window hidden until it decides to show it,
+      // and that window is the one whose title bar the preview has to capture.
+      if (!IsWindowVisible(hwnd)) score -= 100000;
       if (pidMatch) score += 500000;
       if (pathMatch) score += 200000;
       int cw, ch;
