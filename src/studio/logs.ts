@@ -1,3 +1,6 @@
+import type { FlowSection, SectionStatus } from "../types.js";
+import { sectionStatusFromSteps } from "../flow/sections.js";
+
 export type AppLogEntry = {
   at: string;
   level: "info" | "warn" | "error";
@@ -8,9 +11,33 @@ export type TestStepLog = {
   index: number;
   command: string;
   label: string;
-  status: "running" | "passed" | "failed";
+  status: "running" | "passed" | "failed" | "skipped";
   durationMs?: number;
   error?: string;
+  sectionNumber?: number;
+  at?: string;
+};
+
+export type TestSectionDef = {
+  number: number;
+  name: string;
+  description: string;
+  stepIndices: number[];
+};
+
+export type TestSectionLog = {
+  number: number;
+  name: string;
+  description: string;
+  status: SectionStatus;
+  completedSteps: number;
+  totalSteps: number;
+  steps: TestStepLog[];
+  failure?: {
+    command: string;
+    error: string;
+    timestamp: string;
+  };
 };
 
 export type TestRunLog = {
@@ -19,8 +46,9 @@ export type TestRunLog = {
   path: string;
   startedAt: string;
   finishedAt?: string;
-  status: "running" | "passed" | "failed";
+  status: "running" | "passed" | "failed" | "stopped";
   steps: TestStepLog[];
+  sectionDefs: TestSectionDef[];
 };
 
 const appLogs: AppLogEntry[] = [];
@@ -45,14 +73,25 @@ export function clearAppLogs(): void {
   appLogs.length = 0;
 }
 
-export function beginTestRun(id: string, name: string, path: string): TestRunLog {
+export function beginTestRun(
+  id: string,
+  name: string,
+  path: string,
+  sections: FlowSection[] = []
+): TestRunLog {
   const run: TestRunLog = {
     id,
     name,
     path,
     startedAt: new Date().toISOString(),
     status: "running",
-    steps: []
+    steps: [],
+    sectionDefs: sections.map(section => ({
+      number: section.number,
+      name: section.name,
+      description: section.description,
+      stepIndices: [...section.stepIndices]
+    }))
   };
   testRuns.push(run);
   if (testRuns.length > MAX_RUNS) testRuns.splice(0, testRuns.length - MAX_RUNS);
@@ -72,24 +111,77 @@ export function noteTestStep(
     existing.durationMs = step.durationMs ?? existing.durationMs;
     existing.error = step.error;
     existing.label = label;
+    existing.sectionNumber = step.sectionNumber ?? existing.sectionNumber;
+    existing.at = step.at ?? existing.at ?? new Date().toISOString();
     return;
   }
-  run.steps.push({ ...step, label });
+  run.steps.push({
+    ...step,
+    label,
+    at: step.at ?? new Date().toISOString()
+  });
 }
 
-export function finishTestRun(runId: string, status: "passed" | "failed"): void {
+export function finishTestRun(runId: string, status: "passed" | "failed" | "stopped"): void {
   const run = testRuns.find(item => item.id === runId);
   if (!run) return;
   run.status = status;
   run.finishedAt = new Date().toISOString();
 }
 
-export function listTestRuns(): TestRunLog[] {
-  return testRuns.slice().reverse();
+function liveSections(run: TestRunLog): TestSectionLog[] {
+  const runFinished = run.status !== "running";
+  return [...run.sectionDefs]
+    .sort((a, b) => a.number - b.number)
+    .map(section => {
+      const liveSteps = section.stepIndices
+        .map(index => run.steps.find(step => step.index === index))
+        .filter((step): step is TestStepLog => Boolean(step));
+      const totalSteps = section.stepIndices.length;
+      const status = sectionStatusFromSteps(liveSteps, totalSteps, runFinished);
+      const failedStep = liveSteps.find(step => step.status === "failed");
+      return {
+        number: section.number,
+        name: section.name,
+        description: section.description,
+        status,
+        completedSteps: liveSteps.filter(s => s.status === "passed" || s.status === "failed").length,
+        totalSteps,
+        steps: liveSteps,
+        failure: failedStep
+          ? {
+              command: failedStep.command,
+              error: failedStep.error ?? "failed",
+              timestamp: failedStep.at ?? run.finishedAt ?? new Date().toISOString()
+            }
+          : undefined
+      };
+    });
+}
+
+export function listTestRuns(): Array<TestRunLog & { sections: TestSectionLog[] }> {
+  return testRuns
+    .slice()
+    .reverse()
+    .map(run => ({
+      ...run,
+      sections: liveSections(run)
+    }));
 }
 
 export function clearTestRuns(): void {
   testRuns.length = 0;
+}
+
+function windowControlLabel(value: string): string | null {
+  const labels: Record<string, string> = {
+    "window:close": "Close",
+    "window:minimize": "Minimize",
+    "window:maximize": "Maximize",
+    "window:restore": "Restore",
+    "window:title": "the window title bar"
+  };
+  return labels[value] ?? null;
 }
 
 export function formatStepLabel(command: string): string {
@@ -142,7 +234,10 @@ export function formatStepLabel(command: string): string {
     const text = value.slice(splitAt + 1);
     return `Input text "${text}" into ${target}`;
   }
-  if (value.startsWith("role:option/")) return `${verb} "${value.slice("role:option/".length)}"`;
+  const namedRole = /^role:(?:option|radio|checkbox|switch)\/([\s\S]+)$/.exec(value);
+  if (namedRole) return `${verb} "${namedRole[1]}"`;
+  const windowControl = windowControlLabel(value);
+  if (windowControl) return `${verb} ${windowControl}`;
   if (name === "tapOn" && /^[\w.-]+$/.test(value)) return `Tap on id: ${value}`;
   if (!value) return verb;
   return `${verb} "${value}"`;

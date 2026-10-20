@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { FlowDocument, FlowStep } from "../types.js";
 import { FlowError } from "../types.js";
+import { normalizeFlowSections } from "./sections.js";
 
 type RawFlow = {
   appId?: string;
@@ -23,7 +24,7 @@ export function parseFlowFile(path: string): FlowDocument {
 export function parseFlowContent(content: string, source = "flow"): FlowDocument {
   const parts = content.split(/^---\s*$/m);
   let meta: RawFlow;
-  let steps: FlowStep[];
+  let rawSteps: FlowStep[];
 
   if (parts.length >= 2) {
     meta = (parseYaml(parts[0] ?? "") as RawFlow | null) ?? {};
@@ -31,7 +32,7 @@ export function parseFlowContent(content: string, source = "flow"): FlowDocument
     if (!Array.isArray(stepDoc)) {
       throw new FlowError(`${source}: steps after --- must be a YAML list`);
     }
-    steps = stepDoc as FlowStep[];
+    rawSteps = stepDoc as FlowStep[];
   } else {
     const doc = parseYaml(content) as RawFlow & { steps?: FlowStep[] };
     if (!doc || typeof doc !== "object") {
@@ -41,7 +42,7 @@ export function parseFlowContent(content: string, source = "flow"): FlowDocument
     if (!Array.isArray(doc.steps)) {
       throw new FlowError(`${source}: flow must include steps or --- separator`);
     }
-    steps = doc.steps;
+    rawSteps = doc.steps;
   }
 
   const appPath = meta.appPath?.trim() || undefined;
@@ -49,6 +50,8 @@ export function parseFlowContent(content: string, source = "flow"): FlowDocument
   if (!appId) {
     throw new FlowError(`${source}: appPath or appId is required`);
   }
+
+  const { steps, sections } = normalizeFlowSections(rawSteps, source);
 
   return {
     appId,
@@ -58,6 +61,7 @@ export function parseFlowContent(content: string, source = "flow"): FlowDocument
     locale: meta.locale ?? "en",
     env: meta.env,
     driver: meta.driver,
-    steps
+    steps,
+    sections
   };
 }

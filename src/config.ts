@@ -9,31 +9,42 @@ export type SolidFlowConfig = {
   cwd?: string;
 };
 
-const CONFIG_NAMES = ["solidFlow.config.yaml", "solidFlow.config.yml", "testx.config.yaml", "testx.config.yml"];
+const CONFIG_NAMES = [
+  ".solidflow/config.yaml",
+  ".solidflow/config.yml",
+  "solidFlow.config.yaml",
+  "solidFlow.config.yml",
+  "testx.config.yaml",
+  "testx.config.yml"
+];
 
+function configFiles(dir: string): string[] {
+  return CONFIG_NAMES.map(name => resolve(dir, name)).filter(path => existsSync(path));
+}
+
+/**
+ * Scaffolding writes `.solidflow/config.yaml` into every workspace, so it is merged over an older
+ * `solidFlow.config.yaml` key by key instead of replacing it.
+ */
 export function loadConfig(cwd: string = process.cwd()): SolidFlowConfig {
-  for (const name of CONFIG_NAMES) {
-    const path = resolve(cwd, name);
-    if (existsSync(path)) {
-      const raw = parseYaml(readFileSync(path, "utf8")) as SolidFlowConfig | null;
-      return raw ?? {};
+  const merged: Record<string, unknown> = {};
+  for (const path of configFiles(resolve(cwd)).reverse()) {
+    const raw = parseYaml(readFileSync(path, "utf8")) as unknown;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    for (const [key, value] of Object.entries(raw)) {
+      if (value !== undefined && value !== null && value !== "") merged[key] = value;
     }
   }
-  return {};
+  return merged as SolidFlowConfig;
 }
 
 /** Nearest config walking up from `startDir` (e.g. flow folder → solidFlow root). */
 export function loadConfigFromAncestors(startDir: string = process.cwd()): SolidFlowConfig {
   let dir = resolve(startDir);
   for (;;) {
-    const found = loadConfig(dir);
-    if (CONFIG_NAMES.some(name => existsSync(resolve(dir, name)))) {
-      return found;
-    }
+    if (configFiles(dir).length) return loadConfig(dir);
     const parent = dirname(dir);
-    if (parent === dir) {
-      return {};
-    }
+    if (parent === dir) return {};
     dir = parent;
   }
 }

@@ -46,7 +46,7 @@ describe("maestro command catalog", () => {
       await expect(
         runFlowDocument(
           {
-            appId: "fixture.demo",
+            appId: "demo.app",
             driver: "chromium",
             steps: ["addMedia"]
           },

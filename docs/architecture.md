@@ -124,7 +124,7 @@ OAuth2, JWT, RBAC, encryption at rest, audit logs. MVP: local-only, no secrets i
 
 ## CI/CD
 
-- **solidFlow repo:** `pnpm test` on every change (Chromium fixture)
+- **solidFlow repo:** `pnpm test` on every change
 - **CIM export tool:** optional job with `SOLIDFLOW_APP_PATH` set, running a flow from the selected workspace
 
 ## Class diagram (core MVP)

@@ -5,7 +5,8 @@ export type DriverContext = {
   appId: string;
   locale: string;
   appPath?: string;
-  fixtureUrl?: string;
+  /** Page Chromium opens. Desktop flows use appPath instead. */
+  pageUrl?: string;
   headless?: boolean;
   viewport?: { width: number; height: number };
   userDataDir?: string;
@@ -22,6 +23,14 @@ export interface AutomationDriver {
   takeScreenshot(name: string): Promise<string>;
   waitForPopup(timeoutMs: number): Promise<void>;
   switchToMain(): Promise<void>;
+  /** Drop the native dialog target after it has closed. */
+  releaseClosedNativeWindow(): Promise<void>;
+  /** Process of the app under test. Its window title bar is not the SolidFlow studio window. */
+  nativeApp(): { pid: number; appPath: string; hwnd?: string } | null;
+  /** Use the web page inside the focused native window when that window is a web view. */
+  useWebWindow(selector?: string): Promise<boolean>;
+  /** WebView2 profile folder, kept across stopApp / relaunch until clearState. */
+  profileDir?(): string | undefined;
 }
 
 export type LocatorQuery = string;

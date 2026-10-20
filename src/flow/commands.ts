@@ -101,8 +101,31 @@ const SPECS: Spec[] = [
   { name: "waitForHidden", category: "SolidFlow", summary: "Wait until an element is hidden.", available: true, usesSelector: true, insert: { type: "selector" } },
   { name: "executeScript", category: "SolidFlow", summary: "Run JavaScript inside the app page.", available: true, usesSelector: false, insert: { type: "template", body: '- executeScript: "document.title"' } },
   { name: "executeShellCommand", category: "SolidFlow", summary: "Run a local command. Requires SOLIDFLOW_ALLOW_SHELL=1 and an argument list.", available: true, usesSelector: false, insert: { type: "template", body: "- executeShellCommand:\n    args:\n      - echo\n      - hello" } },
-  { name: "waitForPopup", category: "SolidFlow", summary: "Wait for the next WebView or browser window opened by the connected app, then continue there. A separate system browser or native dialog is not followed. Optional timeout is milliseconds.", available: true, usesSelector: false, insert: { type: "template", body: "- waitForPopup:\n    timeout: 10000" } },
-  { name: "switchToMain", category: "SolidFlow", summary: "Return to the original app window.", available: true, usesSelector: false, insert: { type: "bare" } }
+  { name: "waitForPopup", category: "SolidFlow", summary: "Wait for the next window from the connected app, including a folder picker, then continue there. A separate system browser is not followed. Optional timeout is milliseconds.", available: true, usesSelector: false, insert: { type: "template", body: "- waitForPopup:\n    timeout: 10000" } },
+  { name: "switchToMain", category: "SolidFlow", summary: "Return to the original app window.", available: true, usesSelector: false, insert: { type: "bare" } },
+  {
+    name: "section",
+    category: "SolidFlow",
+    summary: "Group commands into a named section for Results reporting.",
+    available: true,
+    usesSelector: false,
+    insert: {
+      type: "template",
+      body: "- section:\n    number: 1\n    name: Section name\n    description: What this section covers\n    steps:"
+    }
+  },
+  {
+    name: "archiveData",
+    category: "SolidFlow",
+    summary:
+      "Copy or move (cut) a folder's contents into this run's test-results/.../archive. Waits until transfer finishes. action: copy | move.",
+    available: true,
+    usesSelector: false,
+    insert: {
+      type: "template",
+      body: "- archiveData:\n    action: move\n    location: path/to/folder"
+    }
+  }
 ];
 
 export function canonicalCommand(name: string): string {

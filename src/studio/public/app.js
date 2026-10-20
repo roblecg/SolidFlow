@@ -5,11 +5,13 @@ const stage = document.getElementById("stage");
 const menu = document.getElementById("menu");
 const statusEl = document.getElementById("status");
 const testLogsEl = document.getElementById("test-logs");
+const sectionLogsEl = document.getElementById("section-logs");
 const appLogsEl = document.getElementById("app-logs");
 const appLogListEl = document.getElementById("app-log-list");
 const logSearchEl = document.getElementById("log-search");
 let logTab = "test";
 let logPoll = 0;
+const expandedSections = new Set();
 const fileLabel = document.getElementById("file-label");
 
 let currentPath = "";
@@ -52,16 +54,177 @@ function yamlStep(command, selector) {
 }
 
 function insertLine(line) {
+  pushHistory("insert");
   const value = editor.value;
   const pos = editor.selectionStart ?? value.length;
   const before = value.slice(0, pos);
   const after = value.slice(pos);
   const prefix = before.endsWith("\n") || before.length === 0 ? "" : "\n";
   const suffix = after.startsWith("\n") || after.length === 0 ? "\n" : "\n";
-  editor.value = before + prefix + line + suffix + after;
   const next = (before + prefix + line).length;
-  editor.focus();
+  editor.value = before + prefix + line + suffix + after;
+  // Assigning value parks the caret at the end. Focusing first would scroll
+  // that caret into view, so the editor jumps to the last line.
+  editor.focus({ preventScroll: true });
   editor.setSelectionRange(next, next);
+  revealEditorCaret(next);
+  noteCommitted();
+  updateDirty();
+}
+
+function revealEditorCaret(index) {
+  const style = getComputedStyle(editor);
+  const lineHeight = parseFloat(style.lineHeight) || editor.scrollHeight / Math.max(1, editor.value.split("\n").length);
+  const mirror = document.createElement("div");
+  mirror.setAttribute("aria-hidden", "true");
+  mirror.style.cssText = "position:absolute;visibility:hidden;left:0;top:0;white-space:pre-wrap;overflow-wrap:break-word;overflow:hidden;pointer-events:none";
+  mirror.style.boxSizing = style.boxSizing;
+  mirror.style.width = editor.clientWidth + "px";
+  mirror.style.padding = style.padding;
+  mirror.style.borderTopWidth = style.borderTopWidth;
+  mirror.style.borderRightWidth = style.borderRightWidth;
+  mirror.style.borderBottomWidth = style.borderBottomWidth;
+  mirror.style.borderLeftWidth = style.borderLeftWidth;
+  mirror.style.borderStyle = "solid";
+  mirror.style.font = style.font;
+  mirror.style.lineHeight = style.lineHeight;
+  mirror.style.letterSpacing = style.letterSpacing;
+  mirror.style.tabSize = style.tabSize;
+  mirror.textContent = editor.value.slice(0, index);
+  const mark = document.createElement("span");
+  mark.textContent = ".";
+  mirror.append(mark);
+  document.body.append(mirror);
+  const top = mark.offsetTop;
+  mirror.remove();
+  const bottom = top + lineHeight;
+  const viewTop = editor.scrollTop;
+  const viewBottom = viewTop + editor.clientHeight;
+  if (top < viewTop) editor.scrollTop = top;
+  else if (bottom > viewBottom) editor.scrollTop = bottom - editor.clientHeight;
+}
+
+let savedContent = "";
+let history = [];
+let redo = [];
+let historyLock = false;
+let burst = null;
+let shortcutHistory = false;
+let committed = null;
+let inputNoted = false;
+
+function editorSnapshot() {
+  return {
+    value: editor.value,
+    start: editor.selectionStart ?? 0,
+    end: editor.selectionEnd ?? 0,
+    scroll: editor.scrollTop
+  };
+}
+
+function updateDirty() {
+  const dot = document.getElementById("save");
+  dot.hidden = !currentPath || editor.value === savedContent;
+}
+
+function markClean() {
+  savedContent = editor.value;
+  updateDirty();
+}
+
+function resetHistory() {
+  history = [];
+  redo = [];
+  burst = null;
+}
+
+function noteCommitted() {
+  committed = editorSnapshot();
+}
+
+function pushHistory(kind, snap = editorSnapshot()) {
+  if (historyLock) return;
+  const now = Date.now();
+  if ((kind === "type" || kind === "delete") && burst && burst.kind === kind && now < burst.until && Math.abs(snap.start - burst.caret) <= 1) {
+    burst.until = now + 450;
+    burst.caret = snap.start;
+    return;
+  }
+  const last = history[history.length - 1];
+  if (last && last.value === snap.value && last.start === snap.start && last.end === snap.end) {
+    burst = null;
+    return;
+  }
+  history.push(snap);
+  if (history.length > 300) history.shift();
+  redo = [];
+  burst = kind === "type" || kind === "delete" ? { kind, until: now + 450, caret: snap.start } : null;
+}
+
+function restoreSnapshot(snap) {
+  historyLock = true;
+  burst = null;
+  editor.value = snap.value;
+  editor.focus({ preventScroll: true });
+  const end = Math.min(snap.end, editor.value.length);
+  const start = Math.min(snap.start, end);
+  editor.setSelectionRange(start, end);
+  editor.scrollTop = snap.scroll;
+  historyLock = false;
+  noteCommitted();
+  updateDirty();
+}
+
+function undoEdit() {
+  if (!history.length) return;
+  redo.push(editorSnapshot());
+  restoreSnapshot(history.pop());
+}
+
+function redoEdit() {
+  if (!redo.length) return;
+  history.push(editorSnapshot());
+  restoreSnapshot(redo.pop());
+}
+
+function applyEditorText(next) {
+  if (next === editor.value) return false;
+  const snap = editorSnapshot();
+  pushHistory("format");
+  historyLock = true;
+  editor.value = next;
+  const caret = Math.min(snap.start, editor.value.length);
+  editor.focus({ preventScroll: true });
+  editor.setSelectionRange(caret, caret);
+  revealEditorCaret(caret);
+  historyLock = false;
+  noteCommitted();
+  updateDirty();
+  return true;
+}
+
+function formatStatus(issues, changed) {
+  if (issues.length) {
+    const preview = issues.slice(0, 2).join("; ");
+    const more = issues.length > 2 ? ` (+${issues.length - 2} more)` : "";
+    return preview + more;
+  }
+  return changed ? "Formatted" : "No spacing changes";
+}
+
+async function formatDocument() {
+  try {
+    const before = editor.value;
+    const result = await api("/api/format", {
+      method: "POST",
+      body: JSON.stringify({ content: before })
+    });
+    const changed = result.content !== before;
+    if (changed) applyEditorText(result.content);
+    setStatus(formatStatus(result.issues || [], changed), "ok");
+  } catch (err) {
+    setStatus(err.message, "bad");
+  }
 }
 
 async function loadTree() {
@@ -254,7 +417,12 @@ async function openFile(path) {
   const data = await api("/api/file?path=" + encodeURIComponent(path));
   currentPath = path;
   fileLabel.textContent = path;
+  historyLock = true;
   editor.value = data.content;
+  historyLock = false;
+  resetHistory();
+  markClean();
+  noteCommitted();
   selectedDir = parentDir(path);
   await loadTree();
 }
@@ -264,11 +432,14 @@ async function save() {
     setStatus("Create or open a flow first", "bad");
     return;
   }
-  await api("/api/file", {
+  const result = await api("/api/file", {
     method: "PUT",
     body: JSON.stringify({ path: currentPath, content: editor.value })
   });
-  setStatus("Saved " + currentPath, "ok");
+  if (result.content !== undefined) applyEditorText(result.content);
+  markClean();
+  const issues = result.issues || [];
+  setStatus(issues.length ? `Saved ${currentPath} — ${formatStatus(issues, true)}` : `Saved ${currentPath}`, "ok");
 }
 
 function renderSnapshot(snap) {
@@ -278,9 +449,15 @@ function renderSnapshot(snap) {
     stage.style.removeProperty("--stage-ratio");
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = snap.error || "Connect the CIM app or the fixture to pick elements.";
+    empty.textContent = snap.error || "Connect the app, then click a control in this preview to insert a YAML command.";
     stage.append(empty);
     return;
+  }
+  // Size the stage to the captured window (e.g. portrait popup) immediately so it is not
+  // letterboxed inside the default landscape --stage-ratio.
+  if (snap.width > 0 && snap.height > 0) {
+    imageSize = { width: snap.width, height: snap.height };
+    stage.style.setProperty("--stage-ratio", String(snap.width / snap.height));
   }
   const img = document.createElement("img");
   img.src = snap.image;
@@ -298,54 +475,35 @@ function renderSnapshot(snap) {
     void pickElement(nx, ny, event.clientX, event.clientY);
   });
   stage.append(img);
-  const box = document.createElement("div");
-  box.className = "highlight";
-  box.hidden = true;
+  const box = solidFlowCreateHighlight();
   stage.append(box);
   img.onmousemove = event => {
     const rect = img.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * (imageSize.width || rect.width);
     const y = ((event.clientY - rect.top) / rect.height) * (imageSize.height || rect.height);
-    const hit = hitTest(x, y);
-    if (!hit) {
-      box.hidden = true;
-      return;
-    }
-    const scaleX = rect.width / (imageSize.width || rect.width);
-    const scaleY = rect.height / (imageSize.height || rect.height);
-    box.hidden = false;
-    box.style.left = hit.bounds.x * scaleX + "px";
-    box.style.top = hit.bounds.y * scaleY + "px";
-    box.style.width = hit.bounds.width * scaleX + "px";
-    box.style.height = hit.bounds.height * scaleY + "px";
+    solidFlowPlaceHighlight(box, hitTest(x, y), imageSize, rect);
   };
 }
 
 function hitTest(x, y) {
-  const hits = nodes.filter(node => {
-    const b = node.bounds;
-    return x >= b.x && y >= b.y && x <= b.x + b.width && y <= b.y + b.height;
-  });
-  hits.sort((a, b) => a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height);
-  return hits[0] || null;
+  return solidFlowHitTest(nodes, x, y, imageSize);
 }
 
 async function pickElement(nx, ny, clientX, clientY) {
   window.clearInterval(poll);
   poll = 0;
-  setStatus("Looking up element…");
+  const local = hitTest(nx * (imageSize.width || 1), ny * (imageSize.height || 1));
   try {
-    const hit = await api("/api/pick", {
-      method: "POST",
-      body: JSON.stringify({ nx, ny })
-    });
-    if (!hit.selector) {
-      setStatus("No element under the pointer. Click a button or field.", "bad");
+    const hit = local && local.selector
+      ? local
+      : await api("/api/pick", { method: "POST", body: JSON.stringify({ nx, ny }) });
+    if (!hit || !hit.selector) {
+      setStatus("No element under the pointer. Click a button, field, or radio.", "bad");
       return;
     }
     selected = hit;
-    showMenu(clientX, clientY, hit);
-    setStatus("Choose a command for " + hit.selector, "ok");
+    setStatus("Choose a command for " + (hit.label || hit.selector), "ok");
+    await showMenu(clientX, clientY, hit);
   } catch (err) {
     setStatus(err.message, "bad");
   } finally {
@@ -355,8 +513,9 @@ async function pickElement(nx, ny, clientX, clientY) {
 
 function showMenu(x, y, node) {
   selected = node;
-  void window.SolidFlowMenu.open(menu, x, y, {
+  return window.SolidFlowMenu.open(menu, x, y, {
     selector: node.selector,
+    label: node.label,
     onInsert: yaml => {
       insertLine(yaml);
       hideMenu();
@@ -412,6 +571,7 @@ async function setMode(next) {
 }
 
 function appendRecorded(line) {
+  pushHistory("insert");
   const value = editor.value.replace(/\s*$/, "");
   const stop = value.lastIndexOf("\n- stopApp");
   if (stop >= 0) {
@@ -419,21 +579,21 @@ function appendRecorded(line) {
   } else {
     editor.value = (value ? value + "\n" : "") + line + "\n";
   }
+  noteCommitted();
+  updateDirty();
 }
 
-async function connect(target) {
-  setStatus("Connecting " + target + "…");
+async function connect() {
+  setStatus("Connecting app…");
   try {
-    const body = { target };
-    if (target === "app") {
-      if (!currentPath) {
-        setStatus("Open a flow and set appPath to the exe.", "bad");
-        return;
-      }
-      body.path = currentPath;
-      body.content = editor.value;
+    if (!currentPath) {
+      setStatus("Open a flow and set appPath to the exe.", "bad");
+      return;
     }
-    await api("/api/session", { method: "POST", body: JSON.stringify(body) });
+    await api("/api/session", {
+      method: "POST",
+      body: JSON.stringify({ path: currentPath, content: editor.value })
+    });
     await setMode(mode);
     if (mode === "inspect") {
       const snap = await api("/api/session");
@@ -481,8 +641,7 @@ channel.onmessage = event => {
     if (event.data.run) document.getElementById("run").click();
   }
 };
-document.getElementById("connect-app").onclick = () => connect("app");
-document.getElementById("connect-fixture").onclick = () => connect("fixture");
+document.getElementById("connect-app").onclick = () => connect();
 document.getElementById("disconnect").onclick = async () => {
   window.clearInterval(poll);
   await api("/api/session", { method: "DELETE" });
@@ -490,7 +649,32 @@ document.getElementById("disconnect").onclick = async () => {
   setStatus("Disconnected");
 };
 document.getElementById("save").onclick = () => save().catch(err => setStatus(err.message, "bad"));
-document.getElementById("run").onclick = async () => {
+
+let testRunning = false;
+const runBtn = document.getElementById("run");
+
+function setRunButton(mode) {
+  if (mode === "stop") {
+    runBtn.textContent = "Stop test";
+    runBtn.classList.remove("btn-primary");
+    runBtn.classList.add("btn-stop");
+  } else {
+    runBtn.textContent = "Run test";
+    runBtn.classList.remove("btn-stop");
+    runBtn.classList.add("btn-primary");
+  }
+}
+
+runBtn.onclick = async () => {
+  if (testRunning) {
+    setStatus("Stopping after the current step…");
+    try {
+      await api("/api/run/stop", { method: "POST" });
+    } catch (err) {
+      setStatus(err.message, "bad");
+    }
+    return;
+  }
   if (!currentPath) {
     setStatus("Open a flow first", "bad");
     return;
@@ -499,6 +683,8 @@ document.getElementById("run").onclick = async () => {
     setStatus("Open a YAML flow to run it", "bad");
     return;
   }
+  testRunning = true;
+  setRunButton("stop");
   setStatus("Running on the app window…");
   showLogTab("test");
   window.clearInterval(poll);
@@ -526,12 +712,16 @@ document.getElementById("run").onclick = async () => {
     });
     if (result.status === "passed") {
       setStatus("Passed", "ok");
+    } else if (result.status === "stopped") {
+      setStatus("Stopped", "muted");
     } else {
       setStatus(result.error || "Failed", "bad");
     }
   } catch (err) {
     setStatus(err.message, "bad");
   } finally {
+    testRunning = false;
+    setRunButton("run");
     window.clearInterval(liveTimer);
     startPoll();
     void refreshLogs();
@@ -541,8 +731,10 @@ document.getElementById("run").onclick = async () => {
 function showLogTab(next) {
   logTab = next;
   document.getElementById("tab-test").classList.toggle("active", next === "test");
+  document.getElementById("tab-sections").classList.toggle("active", next === "sections");
   document.getElementById("tab-app").classList.toggle("active", next === "app");
   testLogsEl.hidden = next !== "test";
+  sectionLogsEl.hidden = next !== "sections";
   appLogsEl.hidden = next !== "app";
 }
 
@@ -566,6 +758,23 @@ function formatClock(iso) {
 }
 
 let testSignature = "";
+let sectionSignature = "";
+let latestTestRuns = [];
+
+function statusMark(status) {
+  if (status === "failed") return "✕";
+  if (status === "running" || status === "stopping") return "…";
+  if (status === "stopped") return "■";
+  if (status === "skipped" || status === "pending") return "–";
+  return "✓";
+}
+
+function formatStatusLabel(status, completed, total) {
+  const label =
+    status === "pending" ? "Pending" : status.charAt(0).toUpperCase() + status.slice(1);
+  if (total == null) return label;
+  return label + " (" + completed + "/" + total + ")";
+}
 
 function renderTestLogs(runs) {
   const signature = JSON.stringify(runs);
@@ -590,7 +799,7 @@ function renderTestLogs(runs) {
     clock.textContent = formatClock(run.startedAt);
     const mark = document.createElement("span");
     mark.className = "mark " + run.status;
-    mark.textContent = run.status === "failed" ? "✕" : run.status === "running" ? "…" : "✓";
+    mark.textContent = statusMark(run.status);
     const time = document.createElement("span");
     time.className = "log-time";
     time.textContent = run.status === "running" && !total ? "" : formatDuration(total);
@@ -601,7 +810,7 @@ function renderTestLogs(runs) {
       row.className = "log-step " + step.status;
       const icon = document.createElement("span");
       icon.className = "mark";
-      icon.textContent = step.status === "failed" ? "✕" : step.status === "running" ? "…" : "✓";
+      icon.textContent = statusMark(step.status);
       const label = document.createElement("span");
       label.textContent = step.label || step.command;
       const secs = document.createElement("span");
@@ -619,6 +828,156 @@ function renderTestLogs(runs) {
     testLogsEl.append(block);
   }
   testLogsEl.scrollTop = scroll;
+}
+
+function shortCommand(command) {
+  if (!command) return "";
+  const match = /^(\w+)/.exec(command);
+  return match ? match[1] : command;
+}
+
+function renderSectionLogs(runs) {
+  const signature = JSON.stringify(
+    runs.map(run => ({
+      id: run.id,
+      status: run.status,
+      sections: run.sections
+    }))
+  );
+  if (signature === sectionSignature) return;
+  sectionSignature = signature;
+  const scroll = sectionLogsEl.scrollTop;
+  sectionLogsEl.innerHTML = "";
+  if (!runs.length) {
+    sectionLogsEl.textContent = "No test runs yet.";
+    return;
+  }
+  for (const run of runs) {
+    const block = document.createElement("article");
+    block.className = "log-run";
+    const title = document.createElement("div");
+    title.className = "log-run-title";
+    title.textContent = run.name;
+    const meta = document.createElement("div");
+    meta.className = "log-run-meta";
+    const clock = document.createElement("span");
+    clock.textContent = formatClock(run.startedAt);
+    const mark = document.createElement("span");
+    mark.className = "mark " + run.status;
+    mark.textContent = statusMark(run.status);
+    meta.append(clock, mark);
+    block.append(title, meta);
+
+    const sections = (run.sections || []).slice().sort((a, b) => a.number - b.number);
+    if (!sections.length) {
+      const empty = document.createElement("div");
+      empty.className = "muted";
+      empty.textContent = "No sections in this run.";
+      block.append(empty);
+      sectionLogsEl.append(block);
+      continue;
+    }
+
+    const table = document.createElement("div");
+    table.className = "section-table";
+    const head = document.createElement("div");
+    head.className = "section-row section-head";
+    head.innerHTML =
+      "<span></span><span>Number</span><span>Name</span><span>Description</span><span>Status</span>";
+    table.append(head);
+
+    for (const section of sections) {
+      const key = run.id + ":" + section.number;
+      const open = expandedSections.has(key);
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "section-row section-summary " + section.status;
+      row.setAttribute("aria-expanded", open ? "true" : "false");
+      const toggle = document.createElement("span");
+      toggle.className = "section-toggle";
+      toggle.textContent = open ? "▼" : "▶";
+      const number = document.createElement("span");
+      number.textContent = String(section.number);
+      const name = document.createElement("span");
+      name.textContent = section.name;
+      const description = document.createElement("span");
+      description.textContent = section.description || "";
+      const status = document.createElement("span");
+      status.className = "section-status mark " + section.status;
+      status.textContent = formatStatusLabel(
+        section.status,
+        section.completedSteps,
+        section.totalSteps
+      );
+      row.append(toggle, number, name, description, status);
+      row.onclick = () => {
+        if (expandedSections.has(key)) expandedSections.delete(key);
+        else expandedSections.add(key);
+        sectionSignature = "";
+        renderSectionLogs(latestTestRuns);
+      };
+      table.append(row);
+
+      if (open) {
+        const details = document.createElement("div");
+        details.className = "section-details";
+        for (const step of section.steps || []) {
+          const stepRow = document.createElement("div");
+          stepRow.className = "log-step section-step " + step.status;
+          const icon = document.createElement("span");
+          icon.className = "mark";
+          icon.textContent = statusMark(step.status);
+          const label = document.createElement("span");
+          label.textContent = step.label || shortCommand(step.command) || step.command;
+          stepRow.append(icon, label);
+          details.append(stepRow);
+        }
+        if (section.failure) {
+          const fail = document.createElement("div");
+          fail.className = "section-failure";
+          fail.innerHTML =
+            "<strong>Failed Command:</strong> " +
+            escapeHtml(section.failure.command) +
+            "<br/><strong>Error:</strong> " +
+            escapeHtml(section.failure.error) +
+            "<br/><strong>Timestamp:</strong> " +
+            escapeHtml(formatFailureTime(section.failure.timestamp));
+          details.append(fail);
+        }
+        table.append(details);
+      }
+    }
+    block.append(table);
+    sectionLogsEl.append(block);
+  }
+  sectionLogsEl.scrollTop = scroll;
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function formatFailureTime(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  const pad = n => String(n).padStart(2, "0");
+  return (
+    date.getFullYear() +
+    "-" +
+    pad(date.getMonth() + 1) +
+    "-" +
+    pad(date.getDate()) +
+    " " +
+    pad(date.getHours()) +
+    ":" +
+    pad(date.getMinutes()) +
+    ":" +
+    pad(date.getSeconds())
+  );
 }
 
 let appSignature = "";
@@ -657,7 +1016,9 @@ async function refreshLogs() {
       api("/api/logs?kind=test"),
       api("/api/logs?kind=app")
     ]);
-    renderTestLogs(tests.runs || []);
+    latestTestRuns = tests.runs || [];
+    renderTestLogs(latestTestRuns);
+    renderSectionLogs(latestTestRuns);
     latestAppEntries = apps.entries || [];
     renderAppLogs(latestAppEntries);
   } catch {
@@ -666,24 +1027,85 @@ async function refreshLogs() {
 }
 
 document.getElementById("tab-test").onclick = () => showLogTab("test");
+document.getElementById("tab-sections").onclick = () => showLogTab("sections");
 document.getElementById("tab-app").onclick = () => showLogTab("app");
 logSearchEl.addEventListener("input", () => {
   renderAppLogs(latestAppEntries);
 });
 document.getElementById("clear-logs").onclick = async () => {
-  await api("/api/logs?kind=" + logTab, { method: "DELETE" });
+  const kind = logTab === "sections" ? "test" : logTab;
+  await api("/api/logs?kind=" + kind, { method: "DELETE" });
   void refreshLogs();
 };
 logPoll = window.setInterval(() => {
   void refreshLogs();
 }, 1000);
 void refreshLogs();
-editor.addEventListener("keydown", event => {
-  if ((event.ctrlKey || event.metaKey) && event.key === "s") {
+function shortcutTarget(event) {
+  const target = event.target;
+  if (target instanceof HTMLInputElement) return false;
+  if (target instanceof HTMLTextAreaElement && target !== editor) return false;
+  return true;
+}
+
+document.addEventListener("keydown", event => {
+  if (!shortcutTarget(event) || event.isComposing) return;
+  const mod = event.ctrlKey || event.metaKey;
+  if (mod && !event.shiftKey && !event.altKey && event.code === "KeyS") {
     event.preventDefault();
     save().catch(err => setStatus(err.message, "bad"));
+    return;
+  }
+  if (!mod && event.shiftKey && event.altKey && event.code === "KeyF") {
+    if (event.repeat) return;
+    event.preventDefault();
+    formatDocument();
+    return;
+  }
+  if (mod && !event.shiftKey && !event.altKey && event.code === "KeyZ") {
+    event.preventDefault();
+    shortcutHistory = true;
+    undoEdit();
+    queueMicrotask(() => {
+      shortcutHistory = false;
+    });
+    return;
+  }
+  if (mod && (event.code === "KeyY" || (event.shiftKey && event.code === "KeyZ")) && !event.altKey) {
+    event.preventDefault();
+    shortcutHistory = true;
+    redoEdit();
+    queueMicrotask(() => {
+      shortcutHistory = false;
+    });
   }
 });
+editor.addEventListener("beforeinput", event => {
+  if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
+    event.preventDefault();
+    if (!shortcutHistory) {
+      if (event.inputType === "historyUndo") undoEdit();
+      else redoEdit();
+    }
+    inputNoted = true;
+    return;
+  }
+  inputNoted = true;
+  const kind = event.inputType && event.inputType.startsWith("delete")
+    ? "delete"
+    : event.inputType === "insertText" || event.inputType === "insertLineBreak" || event.inputType === "insertCompositionText"
+      ? "type"
+      : "edit";
+  pushHistory(kind);
+});
+editor.addEventListener("input", () => {
+  if (historyLock) return;
+  if (!inputNoted && committed && committed.value !== editor.value) pushHistory("edit", committed);
+  inputNoted = false;
+  noteCommitted();
+  updateDirty();
+});
+noteCommitted();
 document.addEventListener("click", event => {
   if (!menu.contains(event.target)) hideMenu();
 });
@@ -918,7 +1340,12 @@ async function confirmFolder() {
     button.title = workspaceState.path;
     button.setAttribute("aria-label", "Select workspace, " + workspaceState.path);
     currentPath = "";
+    historyLock = true;
     editor.value = "";
+    historyLock = false;
+    resetHistory();
+    markClean();
+    noteCommitted();
     fileLabel.textContent = "No file";
     expanded = null;
     selectedDir = "";

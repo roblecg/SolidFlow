@@ -11,23 +11,43 @@ import type {
   RunReport,
   StepReport
 } from "../types.js";
-import { FlowError } from "../types.js";
+import { FlowError, RunStoppedError } from "../types.js";
 import { parseStep } from "./steps.js";
 import { parseFlowFile } from "./parser.js";
+import {
+  buildSectionReports,
+  isSectionStep,
+  normalizeFlowSections,
+  sectionForIndex,
+  UNASSIGNED_SECTION
+} from "./sections.js";
 import { createDriver, inferDriver } from "../driver/registry.js";
 import { defaultLocatorResolver } from "../driver/locator.js";
 import type { AutomationDriver } from "../driver/types.js";
 import { loadConfigFromAncestors, resolveAppPath, shellAllowed } from "../config.js";
-import { fixturePageUrl } from "../util/paths.js";
 import { interpolateEnv } from "../util/ids.js";
 import { uniqueRunFolder } from "../report/run-folder.js";
 import { reportRoot as workspaceReportRoot } from "../studio/workspace.js";
 import { writeReports } from "../report/index.js";
 import { canonicalCommand, unavailableReason } from "./commands.js";
+import { executeArchiveData } from "./archive-data.js";
 import { createScriptState, evalFlowExpression } from "./script-env.js";
 import { desktopCommandNeedsPage, executeDesktopCommand } from "./desktop-commands.js";
+import {
+  captionActionFor,
+  invokeNativeControl,
+  nativeControlVisible,
+  nativeTextVisible,
+  pagePixelHint,
+  parseWindowControl,
+  performCaptionAction,
+  setNativeText,
+  type CaptionAction,
+  type NativeApp
+} from "../driver/native-frame.js";
 
 const activeAppLocks = new Set<string>();
+const FIELD_WAIT_MS = 20_000;
 
 type ExecState = {
   driver: AutomationDriver | null;
@@ -37,6 +57,8 @@ type ExecState = {
   lastLocator?: LocatorMatch;
   script: ReturnType<typeof createScriptState>;
   colorScheme: "light" | "dark";
+  /** Kept across stopApp / relaunch so the app profile is reused until clearState. */
+  userDataDir?: string;
 };
 
 export type DriverSlot = { current: AutomationDriver | null };
@@ -44,12 +66,17 @@ export type DriverSlot = { current: AutomationDriver | null };
 export type RunnerOptions = RunOptions & {
   keepDriver?: boolean;
   driverSlot?: DriverSlot;
+  /** Chromium start page. Desktop flows launch appPath instead. */
+  pageUrl?: string;
+  /** When aborted, finish the current step then stop before the next one. */
+  signal?: AbortSignal;
   onStep?: (event: {
     index: number;
     command: string;
     status: "running" | "passed" | "failed";
     durationMs?: number;
     error?: string;
+    sectionNumber?: number;
   }) => void;
   /** Called after a step with the page that step left current, before the pace pause. */
   onPreview?: (driver: AutomationDriver) => Promise<void>;
@@ -110,13 +137,10 @@ async function runFlowOnce(
     ...(options.env ?? {})
   };
 
-  const driverKind = inferDriver(flow.appId, flow.driver);
+  const driverKind = inferDriver(flow.driver);
   const config = loadConfigFromAncestors(options.cwd ?? process.cwd());
   const appPath = flow.appPath || configAppPath || resolveAppPath(config);
-  let fixtureUrl = env.FIXTURE_URL ?? process.env.SOLIDFLOW_FIXTURE_URL;
-  if (driverKind === "chromium" && !fixtureUrl && flow.appId === "fixture.demo") {
-    fixtureUrl = fixturePageUrl();
-  }
+  const pageUrl = options.pageUrl;
 
   const state: ExecState = {
     driver: options.driverSlot?.current ?? null,
@@ -139,47 +163,72 @@ async function runFlowOnce(
     appPath
   };
 
+  const normalized =
+    flow.sections && !flow.steps.some(isSectionStep)
+      ? { steps: flow.steps, sections: flow.sections }
+      : normalizeFlowSections(flow.steps);
+  const execSteps = normalized.steps;
+  const flowSections = normalized.sections;
+
   try {
-    for (let i = 0; i < flow.steps.length; i++) {
-      const step = flow.steps[i]!;
+    for (let i = 0; i < execSteps.length; i++) {
+      if (options.signal?.aborted) {
+        status = "stopped";
+        runError = new RunStoppedError();
+        break;
+      }
+      const step = execSteps[i]!;
+      const section = sectionForIndex(flowSections, i);
+      const sectionNumber = section?.number;
+      const sectionName =
+        section?.name ?? flow.name ?? flow.appId ?? UNASSIGNED_SECTION.name;
       const stepRetry = options.stepRetry ?? 0;
       let stepReport: StepReport | null = null;
       for (let attempt = 0; attempt <= stepRetry; attempt++) {
+        if (options.signal?.aborted) {
+          status = "stopped";
+          runError = new RunStoppedError();
+          break;
+        }
         const t0 = Date.now();
         const command = formatStep(step);
-        options.onStep?.({ index: i, command, status: "running" });
+        options.onStep?.({ index: i, command, status: "running", sectionNumber });
         try {
           await executeStep(step, state, flow, {
             appPath,
             driverKind,
-            fixtureUrl,
+            pageUrl,
             locale: flow.locale ?? "en",
             headless: options.headless,
             screenshotDir,
+            reportDir,
             flowPath,
-            paceMs
+            paceMs,
+            sectionName
           });
           if (state.driver) await options.onPreview?.(state.driver).catch(() => {});
-          if (paceMs) await delay(paceMs);
+          if (paceMs) await delay(paceMs, options.signal);
           stepReport = {
             index: i,
             command,
             status: "passed",
             durationMs: Date.now() - t0,
             locator: state.lastLocator,
-            screenshot: undefined
+            screenshot: undefined,
+            sectionNumber
           };
           options.onStep?.({
             index: i,
             command,
             status: "passed",
-            durationMs: Date.now() - t0
+            durationMs: Date.now() - t0,
+            sectionNumber
           });
           break;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          if (attempt < stepRetry) {
-            await delay(500);
+          if (attempt < stepRetry && !options.signal?.aborted) {
+            await delay(500, options.signal);
             continue;
           }
           stepReport = {
@@ -188,7 +237,8 @@ async function runFlowOnce(
             status: "failed",
             durationMs: Date.now() - t0,
             error: msg,
-            locator: state.lastLocator
+            locator: state.lastLocator,
+            sectionNumber
           };
           try {
             if (state.driver) {
@@ -205,7 +255,8 @@ async function runFlowOnce(
             command,
             status: "failed",
             durationMs: Date.now() - t0,
-            error: msg
+            error: msg,
+            sectionNumber
           });
           runError = err instanceof Error ? err : new Error(String(err));
           break;
@@ -213,6 +264,11 @@ async function runFlowOnce(
       }
       if (stepReport && stepReport.status === "passed") steps.push(stepReport);
       if (runError) break;
+      if (options.signal?.aborted) {
+        status = "stopped";
+        runError = new RunStoppedError();
+        break;
+      }
     }
   } finally {
     if (state.driver) {
@@ -228,6 +284,10 @@ async function runFlowOnce(
   }
 
   const finishedAt = new Date().toISOString();
+  const sections = buildSectionReports(flowSections, steps, {
+    runFinished: true,
+    finishedAt
+  });
   const report: RunReport = {
     runId,
     flowName: flow.name ?? flow.appId,
@@ -238,11 +298,12 @@ async function runFlowOnce(
     status,
     device: deviceInfo,
     steps,
+    sections,
     reportDir
   };
 
   await writeReports(report);
-  if (runError) {
+  if (runError && !(runError instanceof RunStoppedError)) {
     throw runError;
   }
   return report;
@@ -251,12 +312,16 @@ async function runFlowOnce(
 type StepCtx = {
   appPath?: string;
   driverKind: import("../types.js").DriverKind;
-  fixtureUrl?: string;
+  pageUrl?: string;
   locale: string;
   headless?: boolean;
   screenshotDir: string;
+  /** This run's folder under test-results. */
+  reportDir: string;
   flowPath?: string;
   paceMs: number;
+  /** Current section (or Unassigned / flow) name for archive paths. */
+  sectionName?: string;
 };
 
 async function executeStep(
@@ -307,9 +372,16 @@ async function executeStepBody(
   if (await shouldSkip(parsed, state, flow, ctx)) return;
 
   if (name === "launchApp") {
-    if (parsed.kind === "complex" && isRecord(parsed.value) && parsed.value.clearState === true && state.driver) {
-      await state.driver.clearState();
-      await state.driver.disconnect();
+    const clear =
+      parsed.kind === "complex" && isRecord(parsed.value) && parsed.value.clearState === true;
+    if (state.driver && (clear || !driverSessionOpen(state.driver))) {
+      if (clear) {
+        await state.driver.clearState().catch(() => {});
+        state.userDataDir = undefined;
+      } else {
+        state.userDataDir = state.driver.profileDir?.() ?? state.userDataDir;
+      }
+      await state.driver.disconnect().catch(() => {});
       state.driver = null;
     }
     await ensureDriver(state, flow, ctx);
@@ -345,7 +417,7 @@ async function executeStepBody(
     const driver = state.driver!;
     if (name === "switchToMain") await driver.switchToMain();
     else await driver.waitForPopup(popupTimeout(parsed.kind === "simple" ? undefined : parsed.value));
-    await focusAndAnnounce(driver, name, ctx.paceMs);
+    if (!driver.nativeApp()?.hwnd) await focusAndAnnounce(driver, name, ctx.paceMs);
     return;
   }
 
@@ -354,13 +426,15 @@ async function executeStepBody(
       case "stopApp":
         if (ctx.paceMs) await delay(ctx.paceMs);
         if (state.driver) {
-          await state.driver.disconnect();
+          state.userDataDir = state.driver.profileDir?.() ?? state.userDataDir;
+          await state.driver.disconnect().catch(() => {});
           state.driver = null;
         }
         return;
       case "clearState":
         if (!state.driver) await ensureDriver(state, flow, ctx);
         await state.driver!.clearState();
+        state.userDataDir = state.driver!.profileDir?.();
         return;
       case "scroll":
         if (!state.driver) await ensureDriver(state, flow, ctx);
@@ -489,10 +563,25 @@ async function executeStepBody(
     return;
   }
 
+  if (name === "archiveData") {
+    if (parsed.kind !== "complex" || !isRecord(parsed.value)) {
+      throw new FlowError('archiveData requires action and location, e.g. action: copy');
+    }
+    await executeArchiveData({
+      action: parsed.value.action,
+      location: parsed.value.location,
+      flowDir: state.flowDir,
+      sectionName: ctx.sectionName ?? flow.name ?? flow.appId ?? UNASSIGNED_SECTION.name,
+      env: state.env,
+      reportDir: ctx.reportDir
+    });
+    return;
+  }
+
   if (!state.driver) await ensureDriver(state, flow, ctx);
   const driver = state.driver!;
   const page = driver.getPage();
-  await focusAndAnnounce(driver, name, ctx.paceMs);
+  if (!driver.nativeApp()?.hwnd) await focusAndAnnounce(driver, name, ctx.paceMs);
 
   const strVal = (v: unknown) => interpolateEnv(String(v), state.env);
 
@@ -519,9 +608,20 @@ async function executeStepBody(
       } else {
         q = strVal(raw);
       }
-      const { locator, match } = await defaultLocatorResolver.resolve(page, q, index);
+      const caption = captionActionFor(name, q);
+      if (caption) {
+        await actOnWindow(driver, caption);
+        return;
+      }
+      const dialog = activeNativeWindow(driver);
+      if (dialog) {
+        const stayedOnWindow = await settleNativeField(driver, q, timeout => invokeNativeControl(dialog, q, timeout));
+        if (stayedOnWindow) return;
+      }
+      const activePage = driver.getPage();
+      const { locator, match } = await resolveReady(activePage, q, index);
       state.lastLocator = match;
-      await presentTarget(page, locator, ctx.paceMs);
+      await presentTarget(activePage, locator, ctx.paceMs);
       if (isRecord(raw) && typeof raw.enabled === "boolean" && (await locator.isEnabled()) !== raw.enabled) {
         throw new FlowError(`Element "${q}" did not match enabled: ${String(raw.enabled)}`);
       }
@@ -539,12 +639,22 @@ async function executeStepBody(
       const raw = parsed.kind === "kv" ? parsed.value : parsed.value;
       const q = isRecord(raw) ? strVal(raw.text ?? "") : strVal(raw);
       const parts = q.split("|");
-      const text = parts.length > 1 ? parts.slice(1).join("|") : q;
-      const target = parts.length > 1 ? parts[0]! : undefined;
+      const typed = parts.length > 1 ? parts.slice(1).join("|") : q;
+      const field = parts.length > 1 ? parts[0]! : "";
+      const dialog = activeNativeWindow(driver);
+      if (dialog) {
+        const stayedOnWindow = await settleNativeField(driver, field || undefined, timeout =>
+          setNativeText(dialog, field, typed, timeout)
+        );
+        if (stayedOnWindow) return;
+      }
+      const text = typed;
+      const target = field || undefined;
+      const currentPage = driver.getPage();
       if (target) {
-        const { locator, match } = await defaultLocatorResolver.resolve(page, target);
+        const { locator, match } = await resolveReady(currentPage, target);
         state.lastLocator = match;
-        await presentTarget(page, locator, ctx.paceMs);
+        await presentTarget(currentPage, locator, ctx.paceMs);
         if (ctx.paceMs) {
           await locator.click();
           await locator.fill("");
@@ -553,7 +663,7 @@ async function executeStepBody(
           await locator.fill(text);
         }
       } else {
-        await page.keyboard.type(text, { delay: ctx.paceMs ? 70 : 0 });
+        await currentPage.keyboard.type(text, { delay: ctx.paceMs ? 70 : 0 });
       }
       return;
     }
@@ -608,6 +718,14 @@ async function executeStepBody(
     case "assertVisible": {
       const raw = parsed.kind === "kv" ? parsed.value : parsed.value;
       const q = isRecord(raw) ? strVal(raw.text ?? raw.id ?? "") : strVal(raw);
+      if (parseWindowControl(q)) {
+        await assertWindowControl(driver, q, true, name === "waitForVisible" ? 30_000 : 10_000);
+        return;
+      }
+      if (activeNativeWindow(driver)) {
+        await assertNativeText(driver, q, true, name === "waitForVisible" ? 30_000 : 10_000);
+        return;
+      }
       const { locator, match } = await defaultLocatorResolver.resolve(page, q);
       state.lastLocator = match;
       await locator.waitFor({ state: "visible", timeout: name === "waitForVisible" ? 30_000 : 10_000 });
@@ -618,6 +736,14 @@ async function executeStepBody(
     case "assertNotVisible": {
       const raw = parsed.kind === "kv" ? parsed.value : parsed.value;
       const q = isRecord(raw) ? strVal(raw.text ?? raw.id ?? "") : strVal(raw);
+      if (parseWindowControl(q)) {
+        await assertWindowControl(driver, q, false, 30_000);
+        return;
+      }
+      if (activeNativeWindow(driver)) {
+        await assertNativeText(driver, q, false, 30_000);
+        return;
+      }
       const { locator, match } = await defaultLocatorResolver.resolve(page, q);
       state.lastLocator = match;
       await locator.waitFor({ state: "hidden", timeout: 30_000 });
@@ -729,7 +855,28 @@ async function presentTarget(
   await delay(Math.max(400, Math.min(paceMs, 800)));
 }
 
+function driverSessionOpen(driver: AutomationDriver): boolean {
+  try {
+    if (driver.getPage().isClosed()) return false;
+  } catch {
+    return false;
+  }
+  const native = driver.nativeApp();
+  if (!native?.pid) return true;
+  try {
+    process.kill(native.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function ensureDriver(state: ExecState, flow: FlowDocument, ctx: StepCtx): Promise<void> {
+  if (state.driver && !driverSessionOpen(state.driver)) {
+    state.userDataDir = state.driver.profileDir?.() ?? state.userDataDir;
+    await state.driver.disconnect().catch(() => {});
+    state.driver = null;
+  }
   if (state.driver) {
     if (ctx.paceMs) await state.driver.getPage().bringToFront().catch(() => {});
     return;
@@ -739,11 +886,13 @@ async function ensureDriver(state: ExecState, flow: FlowDocument, ctx: StepCtx):
     appId: flow.appId,
     locale: ctx.locale,
     appPath: ctx.appPath,
-    fixtureUrl: ctx.fixtureUrl,
+    pageUrl: ctx.pageUrl,
     headless: ctx.headless,
-    screenshotDir: ctx.screenshotDir
+    screenshotDir: ctx.screenshotDir,
+    userDataDir: state.userDataDir
   });
   state.driver = driver;
+  state.userDataDir = driver.profileDir?.() ?? state.userDataDir;
 }
 
 function formatStep(step: FlowStep): string {
@@ -752,8 +901,157 @@ function formatStep(step: FlowStep): string {
   return k ? `${k}: ${JSON.stringify(step[k])}` : "{}";
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** A timed-out request may already have clicked or typed, so it is never retried. */
+function canUseWebField(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("is not in") || message.includes("is not ready") || message.includes("cannot be edited");
+}
+
+/** Keep looking for a control that appears after its window, and use the web page once that page has it. */
+async function settleNativeField(
+  driver: AutomationDriver,
+  selector: string | undefined,
+  act: (timeoutMs: number) => Promise<void>
+): Promise<boolean> {
+  const started = Date.now();
+  let last: unknown;
+  while (Date.now() - started < FIELD_WAIT_MS) {
+    const slice = Math.max(200, Math.min(1_500, FIELD_WAIT_MS - (Date.now() - started)));
+    try {
+      await act(last === undefined ? 0 : slice);
+      await driver.releaseClosedNativeWindow();
+      return true;
+    } catch (err) {
+      last = err;
+      if (!canUseWebField(err)) throw err;
+    }
+    if (await driver.useWebWindow(selector)) return false;
+    if (Date.now() - started >= FIELD_WAIT_MS) break;
+    await delay(200);
+  }
+  throw last instanceof Error ? last : new FlowError("The control is not in the window.");
+}
+
+async function resolveReady(
+  page: import("playwright-core").Page,
+  query: string,
+  index?: number,
+  timeoutMs = 15_000
+): Promise<{ locator: import("playwright-core").Locator; match: LocatorMatch }> {
+  const started = Date.now();
+  let last: unknown;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      return await defaultLocatorResolver.resolve(page, query, index);
+    } catch (err) {
+      last = err;
+      await delay(200);
+    }
+  }
+  throw last instanceof Error ? last : new Error(`No element matched locator: ${query}`);
+}
+
+async function actOnWindow(driver: AutomationDriver, action: CaptionAction): Promise<void> {
+  const native = driver.nativeApp();
+  if (!native) {
+    throw new FlowError("Window title bar controls belong to the connected desktop app.");
+  }
+  let hint: Awaited<ReturnType<typeof pagePixelHint>>;
+  try {
+    hint = await pagePixelHint(driver.getPage());
+  } catch {
+    hint = undefined;
+  }
+  await performCaptionAction(native, action, hint);
+  await driver.releaseClosedNativeWindow();
+}
+
+function activeNativeWindow(driver: AutomationDriver): NativeApp | null {
+  const native = driver.nativeApp();
+  if (!native?.hwnd) return null;
+  return native;
+}
+
+async function assertNativeText(
+  driver: AutomationDriver,
+  selector: string,
+  wantVisible: boolean,
+  timeoutMs: number
+): Promise<void> {
+  const started = Date.now();
+  let saw = false;
+  let lastError = "";
+  for (;;) {
+    const native = activeNativeWindow(driver);
+    if (!native) {
+      if (!wantVisible) return;
+      break;
+    }
+    try {
+      const visible = await nativeTextVisible(native, selector);
+      saw = true;
+      lastError = "";
+      if (visible === wantVisible) return;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+    if (Date.now() - started >= timeoutMs) break;
+    await delay(200);
+  }
+  if (!saw && lastError) throw new FlowError(lastError);
+  throw new FlowError(wantVisible ? `${selector} is not visible` : `${selector} is still visible`);
+}
+
+async function assertWindowControl(
+  driver: AutomationDriver,
+  selector: string,
+  wantVisible: boolean,
+  timeoutMs: number
+): Promise<void> {
+  const native = driver.nativeApp();
+  if (!native) {
+    throw new FlowError("Window title bar controls belong to the connected desktop app.");
+  }
+  const started = Date.now();
+  let visible = false;
+  let saw = false;
+  let lastError = "";
+  for (;;) {
+    let hint: Awaited<ReturnType<typeof pagePixelHint>>;
+    try {
+      hint = await pagePixelHint(driver.getPage());
+    } catch {
+      hint = undefined;
+    }
+    try {
+      visible = await nativeControlVisible(native, selector, hint);
+      saw = true;
+      lastError = "";
+      if (visible === wantVisible) return;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+    if (Date.now() - started >= timeoutMs) break;
+    await delay(200);
+  }
+  if (!saw && lastError) throw new FlowError(lastError);
+  throw new FlowError(wantVisible ? `${selector} is not visible` : `${selector} is still visible`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

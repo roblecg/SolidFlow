@@ -19,10 +19,8 @@ export function createDriver(kind: DriverKind): AutomationDriver {
   }
 }
 
-export function inferDriver(appId: string, explicit?: DriverKind): DriverKind {
-  if (explicit) return explicit;
-  if (appId.startsWith("fixture.")) return "chromium";
-  return "webview2";
+export function inferDriver(explicit?: DriverKind): DriverKind {
+  return explicit ?? "webview2";
 }
 
 export function listDevices(): Array<{ id: string; platform: string; driver: DriverKind; status: string }> {

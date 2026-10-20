@@ -16,8 +16,10 @@ import {
 } from "./logs.js";
 import { resolveAppPath } from "../config.js";
 import { listCommands } from "../flow/commands.js";
+import { describeFormatIssue, formatFlowContent, formatFlowDocument } from "../flow/format.js";
 import { parseFlowContent, parseFlowFile } from "../flow/parser.js";
 import { runFlowFile, type DriverSlot } from "../flow/runner.js";
+import type { FlowSection } from "../types.js";
 import {
   createWorkspaceDir,
   createWorkspaceFile,
@@ -59,6 +61,7 @@ type LiveRun = {
 };
 
 const liveRun: LiveRun = { running: false, command: "", status: "idle", log: [] };
+let runAbort: AbortController | null = null;
 
 const PUBLIC_DIR = join(packageRoot(), "src/studio/public");
 
@@ -179,9 +182,38 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       sendJson(res, 400, { error: "path and content are required" });
       return;
     }
-    await writeFlow(body.path, body.content);
+    let content = body.content;
+    let issues: string[] = [];
+    try {
+      const formatted = formatFlowDocument(content);
+      content = formatted.content;
+      issues = formatted.issues.map(describeFormatIssue);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, 400, { error: `Format failed: ${message}` });
+      return;
+    }
+    await writeFlow(body.path, content);
     appLog("info", `Saved flow ${body.path}`);
-    sendJson(res, 200, { ok: true });
+    sendJson(res, 200, { ok: true, content, issues });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/format") {
+    const body = await readBody<{ content?: string }>(req);
+    if (body.content === undefined) {
+      sendJson(res, 400, { error: "content is required" });
+      return;
+    }
+    try {
+      const formatted = formatFlowDocument(body.content);
+      sendJson(res, 200, {
+        content: formatted.content,
+        issues: formatted.issues.map(describeFormatIssue)
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, 400, { error: `Format failed: ${message}` });
+    }
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/file") {
@@ -197,19 +229,43 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     sendJson(res, 200, { path });
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/run/stop") {
+    if (!liveRun.running || !runAbort) {
+      sendJson(res, 200, { ok: true, stopped: false });
+      return;
+    }
+    runAbort.abort();
+    liveRun.command = "Stopping…";
+    liveRun.status = "stopping";
+    appLog("info", "Stop requested — finishing the current step, then ending the run");
+    sendJson(res, 200, { ok: true, stopped: true });
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/run") {
     if (rejectWithoutWorkspace(res)) return;
+    if (liveRun.running) {
+      sendJson(res, 409, { error: "A test is already running. Stop it before starting another." });
+      return;
+    }
     const body = await readBody<{ path?: string; content?: string }>(req);
     if (!body.path) {
       sendJson(res, 400, { error: "path is required" });
       return;
     }
     if (body.content !== undefined) {
-      await writeFlow(body.path, body.content);
+      let content = body.content;
+      try {
+        content = formatFlowContent(content);
+      } catch {
+        // Run still attempts parse; keep raw content if format fails.
+      }
+      await writeFlow(body.path, content);
     }
     await setRecordingPaused(true);
     const slot: DriverSlot = { current: borrowDriver() };
     const config = workspaceConfig();
+    const abort = new AbortController();
+    runAbort = abort;
     liveRun.running = true;
     liveRun.log = [];
     liveRun.status = "running";
@@ -217,12 +273,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const runId = newRunId();
     const fileName = body.path.split("/").pop()?.replace(/\.ya?ml$/i, "") ?? body.path;
     let flowName = fileName;
+    let flowSections: FlowSection[] = [];
     try {
-      flowName = parseFlowFile(resolveFlowPath(body.path)).name || fileName;
+      const flow = parseFlowFile(resolveFlowPath(body.path));
+      flowName = flow.name || fileName;
+      flowSections = flow.sections ?? [];
     } catch {
       // The runner reports the parse error. Keep the file name on the log row.
     }
-    beginTestRun(runId, flowName, body.path);
+    beginTestRun(runId, flowName, body.path, flowSections);
     appLog("info", `Run started: ${body.path}`);
     try {
       const report = await runFlowFile(resolveFlowPath(body.path), {
@@ -232,6 +291,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         paceMs: STUDIO_PACE_MS,
         keepDriver: true,
         driverSlot: slot,
+        signal: abort.signal,
         onStep: event => {
           liveRun.command = event.command;
           liveRun.status = event.status;
@@ -241,7 +301,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         onPreview: publishRunPreview
       }, resolveAppPath(config));
       finishTestRun(runId, report.status);
-      appLog(report.status === "passed" ? "info" : "error", `Run ${report.status}: ${body.path}`);
+      const level = report.status === "passed" ? "info" : report.status === "stopped" ? "warn" : "error";
+      appLog(level, `Run ${report.status}: ${body.path}`);
       liveRun.status = report.status;
       sendJson(res, 200, {
         status: report.status,
@@ -250,8 +311,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           command: step.command,
           status: step.status,
           error: step.error,
-          durationMs: step.durationMs
-        }))
+          durationMs: step.durationMs,
+          sectionNumber: step.sectionNumber
+        })),
+        sections: report.sections
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -264,6 +327,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       });
     } finally {
       liveRun.running = false;
+      runAbort = null;
       adoptDriver(slot.current);
       clearRunPreview();
       await setRecordingPaused(false);
@@ -321,18 +385,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/session") {
-    const body = await readBody<{ target?: "app" | "fixture"; path?: string; content?: string }>(req);
-    const next = body.target === "fixture" ? "fixture" : "app";
-    let flowAppPath: string | undefined;
-    if (next === "app") {
-      if (!body.content?.trim()) {
-        sendJson(res, 400, { error: "Open a flow and set appPath to the exe you want to connect." });
-        return;
-      }
-      flowAppPath = parseFlowContent(body.content, body.path || "flow").appPath;
+    const body = await readBody<{ path?: string; content?: string }>(req);
+    if (!body.content?.trim()) {
+      sendJson(res, 400, { error: "Open a flow and set appPath to the exe you want to connect." });
+      return;
     }
-    await startSession(next, flowAppPath);
-    appLog("info", `Connected ${next} session`);
+    const flowAppPath = parseFlowContent(body.content, body.path || "flow").appPath;
+    await startSession(flowAppPath);
+    appLog("info", "Connected app session");
     sendJson(res, 200, await snapshot());
     return;
   }

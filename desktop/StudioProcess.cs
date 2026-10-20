@@ -22,12 +22,16 @@ internal sealed class StudioProcess : IDisposable
 
     public static StudioProcess Start(string repo, string nodeExe, string? workspace)
     {
+        var distCli = Path.Combine(repo, "dist", "cli.js");
         var tsx = Path.Combine(repo, "node_modules", "tsx", "dist", "cli.mjs");
         var cli = Path.Combine(repo, "src", "cli.ts");
-        if (!File.Exists(tsx) || !File.Exists(cli))
+        var useSource = File.Exists(tsx) && File.Exists(cli);
+        if (!useSource && !File.Exists(distCli))
         {
             throw new InvalidOperationException(
-                "SolidFlow dependencies are missing. In the solidFlow folder, run pnpm install, then open SolidFlow again.");
+                Directory.Exists(Path.Combine(RepoRoot.ExeDirectory(), "app"))
+                    ? "SolidFlow is missing its program files. Unzip the full SolidFlow folder, then open SolidFlow.exe again."
+                    : "SolidFlow dependencies are missing. In the solidFlow folder, run pnpm install, then open SolidFlow again.");
         }
 
         for (var port = 4317; port < 4330; port++)
@@ -54,8 +58,15 @@ internal sealed class StudioProcess : IDisposable
             {
                 process.StartInfo.Environment["SOLIDFLOW_WORKSPACE"] = workspace;
             }
-            process.StartInfo.ArgumentList.Add(tsx);
-            process.StartInfo.ArgumentList.Add(cli);
+            if (useSource)
+            {
+                process.StartInfo.ArgumentList.Add(tsx);
+                process.StartInfo.ArgumentList.Add(cli);
+            }
+            else
+            {
+                process.StartInfo.ArgumentList.Add(distCli);
+            }
             process.StartInfo.ArgumentList.Add("studio");
             process.StartInfo.ArgumentList.Add(port.ToString());
             process.StartInfo.ArgumentList.Add("--no-browser");

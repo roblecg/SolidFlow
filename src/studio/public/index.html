@@ -47,7 +47,6 @@
         </div>
         <div class="command-end">
           <button id="connect-app" class="tool-btn tool-btn-strong" type="button">Connect app</button>
-          <button id="connect-fixture" class="tool-btn" type="button">Connect fixture</button>
           <span class="toolbar-sep" aria-hidden="true"></span>
           <button id="disconnect" class="tool-btn tool-btn-quiet" type="button">Disconnect</button>
         </div>
@@ -70,8 +69,8 @@
         <section class="pane editor-pane">
           <div class="editor-head">
             <strong id="file-label">No file</strong>
+            <button id="save" class="dirty-dot" type="button" hidden title="Unsaved changes (Ctrl+S)" aria-label="Unsaved changes"></button>
             <span class="spacer"></span>
-            <button id="save" class="btn">Save</button>
           </div>
           <textarea id="editor" spellcheck="false" placeholder="Select or create a flow…"></textarea>
         </section>
@@ -85,12 +84,14 @@
       <section class="log-panel">
         <div class="log-tabs">
           <button id="tab-test" class="log-tab active" type="button">Test logs</button>
+          <button id="tab-sections" class="log-tab" type="button">Sections</button>
           <button id="tab-app" class="log-tab" type="button">App logs</button>
           <span id="status" class="status muted"></span>
           <span class="spacer"></span>
           <button id="run" class="btn btn-primary" type="button">Run test</button>
         </div>
         <div id="test-logs" class="log-body"></div>
+        <div id="section-logs" class="log-body" hidden></div>
         <div id="app-logs" class="log-body" hidden>
           <input id="log-search" type="search" placeholder="Search keywords" />
           <div id="app-log-list"></div>
@@ -121,6 +122,7 @@
       <div class="sep"></div>
       <button type="button" data-action="reveal">Show in Explorer</button>
     </div>
+    <script src="/inspect-hit.js"></script>
     <script src="/command-menu.js"></script>
     <script src="/app.js"></script>
   </body>

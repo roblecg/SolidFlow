@@ -38,4 +38,14 @@ export class UnavailableDriver implements AutomationDriver {
   async switchToMain(): Promise<void> {
     throw new DriverNotAvailableError(this.kind);
   }
+
+  async releaseClosedNativeWindow(): Promise<void> {}
+
+  nativeApp(): { pid: number; appPath: string; hwnd?: string } | null {
+    return null;
+  }
+
+  async useWebWindow(_selector?: string): Promise<boolean> {
+    return false;
+  }
 }

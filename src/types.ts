@@ -9,12 +9,24 @@ export type FlowDocument = {
   locale?: string;
   env?: Record<string, string>;
   driver?: DriverKind;
+  /** Flattened executable commands (section wrappers expanded). */
   steps: FlowStep[];
+  /** Logical groupings over `steps`, including Unassigned (0) when needed. */
+  sections?: FlowSection[];
 };
 
 export type FlowStep =
   | string
   | Record<string, string | number | boolean | FlowStep[] | Record<string, unknown>>;
+
+/** Metadata for a named (or Unassigned) group of flattened steps. */
+export type FlowSection = {
+  number: number;
+  name: string;
+  description: string;
+  /** Indices into FlowDocument.steps / StepReport.index */
+  stepIndices: number[];
+};
 
 export type LocatorMatch = {
   strategy: "testId" | "id" | "text" | "role" | "partialText";
@@ -24,6 +36,8 @@ export type LocatorMatch = {
 
 export type StepStatus = "passed" | "failed" | "skipped";
 
+export type SectionStatus = "passed" | "failed" | "skipped" | "running" | "pending";
+
 export type StepReport = {
   index: number;
   command: string;
@@ -32,6 +46,22 @@ export type StepReport = {
   error?: string;
   locator?: LocatorMatch;
   screenshot?: string;
+  sectionNumber?: number;
+};
+
+export type SectionReport = {
+  number: number;
+  name: string;
+  description: string;
+  status: SectionStatus;
+  completedSteps: number;
+  totalSteps: number;
+  steps: StepReport[];
+  failure?: {
+    command: string;
+    error: string;
+    timestamp: string;
+  };
 };
 
 export type RunReport = {
@@ -41,9 +71,10 @@ export type RunReport = {
   driver: DriverKind;
   startedAt: string;
   finishedAt: string;
-  status: "passed" | "failed";
+  status: "passed" | "failed" | "stopped";
   device: DeviceInfo;
   steps: StepReport[];
+  sections: SectionReport[];
   reportDir: string;
 };
 
@@ -79,5 +110,12 @@ export class FlowError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "FlowError";
+  }
+}
+
+export class RunStoppedError extends Error {
+  constructor(message = "Test stopped by user") {
+    super(message);
+    this.name = "RunStoppedError";
   }
 }

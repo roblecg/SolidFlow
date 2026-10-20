@@ -167,17 +167,25 @@ internal static class WorkspaceStore
     {
         try
         {
-            var repo = Path.GetFullPath(RepoRoot.Find())
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            var full = Path.GetFullPath(path)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            return full.Equals(repo, StringComparison.OrdinalIgnoreCase)
-                || full.StartsWith(repo + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            if (IsUnder(path, RepoRoot.Find())) return true;
+            var exeDir = RepoRoot.ExeDirectory();
+            var bundled = Path.Combine(exeDir, "app", "package.json");
+            return File.Exists(bundled) && IsUnder(path, exeDir);
         }
         catch (InvalidOperationException)
         {
             return false;
         }
+    }
+
+    private static bool IsUnder(string path, string root)
+    {
+        var baseDir = Path.GetFullPath(root)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var full = Path.GetFullPath(path)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return full.Equals(baseDir, StringComparison.OrdinalIgnoreCase)
+            || full.StartsWith(baseDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     private static WorkspaceSettings Read()

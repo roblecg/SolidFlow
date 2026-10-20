@@ -7,12 +7,11 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { writeFile, mkdir } from "node:fs/promises";
 import { runDoctor } from "./doctor.js";
-import { listDevices, createDriver, inferDriver } from "./driver/registry.js";
+import { listDevices, createDriver } from "./driver/registry.js";
 import { runFlowFile } from "./flow/runner.js";
 import { parseFlowFile } from "./flow/parser.js";
 import { matchesName, matchesTags } from "./flow/validate.js";
 import { reportRoot, useSavedWorkspace } from "./studio/workspace.js";
-import { fixturePageUrl } from "./util/paths.js";
 import { captureHierarchy } from "./inspector/hierarchy.js";
 import { writeInspectorPage } from "./inspector/viewer.js";
 import { RECORDER_INIT_SCRIPT, stepsToYaml, type RecordedStep } from "./recorder/script.js";
@@ -202,30 +201,20 @@ function findLatestReport(root: string): string | null {
 
 async function runInspect(target: string, out?: string): Promise<void> {
   const resolved = resolve(target);
-  let url = target;
-  let appId = "inspect.session";
-  if (existsSync(resolved) && resolved.endsWith(".yaml")) {
-    const flow = parseFlowFile(resolved);
-    appId = flow.appId;
-    const driverKind = inferDriver(flow.appId, flow.driver);
-    if (driverKind === "chromium") {
-      url = fixturePageUrl();
-    } else {
-      console.error("Inspect for WebView2 flows: launch app separately; use record URL or fixture.");
-      process.exit(1);
-    }
-  } else if (!target.includes("://")) {
-    url = pathToFileURL(resolve(target)).href;
+  if (existsSync(resolved) && /\.ya?ml$/i.test(resolved)) {
+    console.error("Inspect for app flows: launch the app separately, or pass a page URL.");
+    process.exit(1);
   }
+  const url = target.includes("://") ? target : pathToFileURL(resolve(target)).href;
 
   const driver = createDriver("chromium");
   useSavedWorkspace();
   const outDir = out ? resolve(out) : join(reportRoot(), "inspector");
   await mkdir(outDir, { recursive: true });
   await driver.connect({
-    appId,
+    appId: "inspect.session",
     locale: "en",
-    fixtureUrl: url,
+    pageUrl: url,
     headless: true,
     screenshotDir: outDir
   });
@@ -248,7 +237,7 @@ async function runRecord(url: string, outFile: string): Promise<void> {
   await driver.connect({
     appId: "record.session",
     locale: "en",
-    fixtureUrl: target,
+    pageUrl: target,
     headless: false,
     screenshotDir: join(reportRoot(), "record")
   });
@@ -266,7 +255,7 @@ async function runRecord(url: string, outFile: string): Promise<void> {
     return recorder && Array.isArray(recorder.steps) ? recorder.steps : [];
   })()`)) as RecordedStep[];
 
-  const yaml = stepsToYaml(steps, "fixture.demo");
+  const yaml = stepsToYaml(steps, "recorded");
   const outPath = resolve(outFile);
   await writeFile(outPath, yaml, "utf8");
   const editorDir = join(dirname(outPath), ".solidFlow-recorder");
@@ -274,7 +263,7 @@ async function runRecord(url: string, outFile: string): Promise<void> {
   const editorHtml = await writeRecorderEditor(
     editorDir,
     JSON.stringify(steps),
-    yaml.split("\n")[0] ?? "appId: fixture.demo"
+    yaml.split("\n")[0] ?? "appId: recorded"
   );
   await driver.disconnect();
   console.log(`Saved ${steps.length} steps to ${outPath}`);

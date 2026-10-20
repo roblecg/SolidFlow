@@ -9,9 +9,9 @@ export class ChromiumDriver extends PlaywrightBaseDriver {
 
   async connect(ctx: DriverContext): Promise<void> {
     this.ctx = ctx;
-    const url = ctx.fixtureUrl;
+    const url = ctx.pageUrl;
     if (!url) {
-      throw new Error("Chromium driver requires fixtureUrl in context");
+      throw new Error("Chromium driver requires a page URL");
     }
     const target = url.startsWith("file:") || url.includes("://") ? url : pathToFileURL(resolve(url)).href;
     await this.launchChromium(ctx.headless ?? true, target);

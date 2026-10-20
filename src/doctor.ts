@@ -91,9 +91,10 @@ export async function runDoctor(flowPath?: string): Promise<DoctorResult> {
           ok = false;
           messages.push(`FAIL flow appPath not found: ${flow.appPath}`);
         }
-      } else if (!flow.appId.startsWith("fixture.")) {
-        if (fallbackPath) noteFallback();
-        else messages.push("WARN flow has no appPath. Set appPath to the exe on the flow.");
+      } else if (fallbackPath) {
+        noteFallback();
+      } else {
+        messages.push("WARN flow has no appPath. Set appPath to the exe on the flow.");
       }
     } catch (e) {
       ok = false;
