@@ -39,8 +39,9 @@ import {
   workspaceStatus
 } from "./workspace.js";
 import {
-  adoptDriver,
   borrowDriver,
+  sessionStamp,
+  settleBorrowedDriver,
   clearRunPreview,
   drainRecordedLines,
   pickAt,
@@ -273,6 +274,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     liveRun.command = "Starting…";
     const slot: DriverSlot = { current: null };
     let borrowed = false;
+    let borrowedStamp = 0;
     const config = workspaceConfig();
     const runId = newRunId();
     const fileName = body.path.split("/").pop()?.replace(/\.ya?ml$/i, "") ?? body.path;
@@ -296,6 +298,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         sendJson(res, 200, { status: "stopped", steps: [], sections: [] });
         return;
       }
+      borrowedStamp = sessionStamp();
       slot.current = borrowDriver();
       borrowed = true;
       const report = await runFlowFile(resolveFlowPath(body.path), {
@@ -342,7 +345,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     } finally {
       liveRun.running = false;
       runAbort = null;
-      if (borrowed) adoptDriver(slot.current);
+      if (borrowed) await settleBorrowedDriver(borrowedStamp, slot.current);
       clearRunPreview();
       await setRecordingPaused(false);
     }

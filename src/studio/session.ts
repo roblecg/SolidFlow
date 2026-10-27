@@ -136,6 +136,22 @@ export function borrowDriver(): AutomationDriver | null {
   return current;
 }
 
+export function sessionStamp(): number {
+  return sessionEpoch;
+}
+
+/**
+ * Put a borrowed driver back when the session was left alone.
+ * Connect or disconnect during the run owns the session driver, so the run's driver is closed instead.
+ */
+export async function settleBorrowedDriver(stamp: number, current: AutomationDriver | null): Promise<void> {
+  if (stamp !== sessionEpoch) {
+    if (current && current !== driver) await current.disconnect().catch(() => {});
+    return;
+  }
+  adoptDriver(current);
+}
+
 export function adoptDriver(next: AutomationDriver | null): void {
   driver = next;
   if (!next) {
@@ -263,15 +279,38 @@ export async function publishRunPreview(automation: AutomationDriver): Promise<v
   }
 }
 
+const WINDOW_LIST_MS = 1000;
+let listedDriver: AutomationDriver | null = null;
+let listedAt = 0;
+let listedWindows: { file: string; label: string }[] | null = null;
+let listedTask: Promise<{ file: string; label: string }[]> | null = null;
+
 export async function listSwitchWindows(): Promise<{
   connected: boolean;
   windows: { file: string; label: string }[];
 }> {
   if (!driver) return { connected: false, windows: [] };
+  const current = driver;
+  if (listedDriver === current && listedWindows && Date.now() - listedAt < WINDOW_LIST_MS) {
+    return { connected: true, windows: listedWindows };
+  }
+  let task = listedDriver === current ? listedTask : null;
+  if (!task) {
+    listedDriver = current;
+    listedWindows = null;
+    task = current.listSwitchWindows();
+    listedTask = task;
+  }
   try {
-    return { connected: true, windows: await driver.listSwitchWindows() };
+    const windows = await task;
+    if (driver !== current) return { connected: false, windows: [] };
+    listedWindows = windows;
+    listedAt = Date.now();
+    return { connected: true, windows };
   } catch {
-    return { connected: true, windows: [] };
+    return { connected: driver === current, windows: [] };
+  } finally {
+    if (listedDriver === current) listedTask = null;
   }
 }
 

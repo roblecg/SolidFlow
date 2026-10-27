@@ -65,6 +65,7 @@ export class ElectronDriver extends PlaywrightBaseDriver {
       await this.getPage().waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
       await this.revealMainWindow();
       await this.rememberNativePopups();
+      this.adoptOpenPages();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.disconnect().catch(() => {});

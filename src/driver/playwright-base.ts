@@ -83,8 +83,8 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
       while (Date.now() - started < timeoutMs) {
         attach();
         const page =
-          pending.find(item => !item.isClosed() && !seenPages.has(item)) ??
-          this.listOpenPages().find(item => !seenPages.has(item));
+          pending.find(item => unseenAppPage(item, seenPages)) ??
+          this.listOpenPages().find(item => unseenAppPage(item, seenPages));
         if (page) {
           await this.adoptPage(page, timeoutMs, started);
           return;
@@ -155,7 +155,8 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
 
   /**
    * Select a window by page file, caption, or heading.
-   * This does not replace the original window and does not mark the page as already seen by waitForPopup.
+   * The original window stays remembered for switchToMain.
+   * This window counts as already seen, so waitForPopup still waits for a later one.
    */
   async switchToWindow(query: WindowQuery, timeoutMs: number): Promise<void> {
     if (!this.browser || !this.page) {
@@ -176,6 +177,7 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
       if (found.kind === "native") {
         this.focusedNativeWindow = found.hwnd;
         this.webWindow = false;
+        this.adoptedNativePopups.add(found.hwnd.hwnd);
         return;
       }
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -185,8 +187,13 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     );
   }
 
-  /** Pages the connected app has open, one entry per file name. */
+  /** Visible app windows, one entry per file name. A hidden page is omitted until it is shown. */
   async listSwitchWindows(): Promise<SwitchWindowChoice[]> {
+    const native = this.nativeApp();
+    const windows =
+      native && process.platform === "win32"
+        ? await listNativePopups({ pid: native.pid, appPath: native.appPath }).catch(() => [])
+        : [];
     const seen = new Map<string, SwitchWindowChoice>();
     for (const page of this.listOpenPages()) {
       let url = "";
@@ -200,6 +207,13 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
       if (!file) continue;
       const key = file.toLowerCase();
       if (seen.has(key)) continue;
+      let visible = false;
+      try {
+        visible = (await this.readyWebTarget(page, windows)).kind === "web";
+      } catch {
+        visible = false;
+      }
+      if (!visible) continue;
       seen.set(key, { file, label: await this.switchWindowLabel(page, file) });
     }
     return [...seen.values()].sort((a, b) => a.file.localeCompare(b.file));
@@ -290,7 +304,13 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     if (!this.page) return;
     this.mainPage = this.page;
     this.adoptedPages.clear();
-    this.adoptedPages.add(this.page);
+    // Pages already open belong to the app as it is now. waitForPopup follows one that opens afterward.
+    this.adoptOpenPages();
+  }
+
+  /** Remember every page that exists so a hidden dialog is not treated as the next new window. */
+  protected adoptOpenPages(): void {
+    for (const page of this.listOpenPages()) this.adoptedPages.add(page);
   }
 
   private focusNativePopup(popup: NativePopup): void {
@@ -307,9 +327,11 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
   /** Point commands at this page. waitForPopup still treats the page as new until it adopts it itself. */
   private async useSwitchedPage(page: Page, hwnd: NativePopup | null): Promise<void> {
     this.page = page;
+    this.adoptedPages.add(page);
     if (hwnd && !isClassicDialog(hwnd)) {
       this.focusedNativeWindow = hwnd;
       this.webWindow = true;
+      this.adoptedNativePopups.add(hwnd.hwnd);
     } else {
       this.clearFocusedWindow();
     }
@@ -594,6 +616,17 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
 }
 
 /** The element's own text, so a heading matches without also matching the paragraph under it. */
+function unseenAppPage(page: Page, seen: Set<Page>): boolean {
+  if (page.isClosed() || seen.has(page)) return false;
+  try {
+    const url = page.url();
+    // about:blank stays eligible: a script can open a window and write into it.
+    return !url.startsWith("devtools://") && !url.startsWith("chrome://") && !url.startsWith("chrome-extension://");
+  } catch {
+    return false;
+  }
+}
+
 async function pageHasVisibleText(page: Page, text: string): Promise<boolean> {
   const wanted = text.trim();
   if (!wanted) return false;

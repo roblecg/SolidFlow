@@ -47,6 +47,7 @@ export class WebView2Driver extends PlaywrightBaseDriver {
 
     await this.getPage().waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
     await this.rememberNativePopups();
+    this.adoptOpenPages();
   }
 
   async disconnect(): Promise<void> {
