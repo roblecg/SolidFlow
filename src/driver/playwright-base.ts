@@ -7,7 +7,15 @@ import { defaultLocatorResolver } from "./locator.js";
 import { chooseNativePopup, isClassicDialog, listNativePopups, type NativePopup } from "./native-frame.js";
 import { isAppPageUrl, isKcpsDesktop, isKcpsMainPageUrl } from "./electron-app.js";
 import { localeInitScript } from "./locale-init.js";
-import { describeWindowQuery, hwndForBounds, outerBounds, urlMatchesFile, type WindowQuery } from "./window-target.js";
+import {
+  describeWindowQuery,
+  hwndForBounds,
+  outerBounds,
+  pageFileName,
+  urlMatchesFile,
+  type SwitchWindowChoice,
+  type WindowQuery
+} from "./window-target.js";
 import os from "node:os";
 import type { Page } from "playwright-core";
 
@@ -175,6 +183,26 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     throw new FlowError(
       `No open window matched ${describeWindowQuery(query)}. The window has to be visible in the connected app.`
     );
+  }
+
+  /** Pages the connected app has open, one entry per file name. */
+  async listSwitchWindows(): Promise<SwitchWindowChoice[]> {
+    const seen = new Map<string, SwitchWindowChoice>();
+    for (const page of this.listOpenPages()) {
+      let url = "";
+      try {
+        url = page.url();
+      } catch {
+        continue;
+      }
+      if (!isAppPageUrl(url)) continue;
+      const file = pageFileName(url);
+      if (!file) continue;
+      const key = file.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.set(key, { file, label: await this.switchWindowLabel(page, file) });
+    }
+    return [...seen.values()].sort((a, b) => a.file.localeCompare(b.file));
   }
 
   async releaseClosedNativeWindow(): Promise<void> {
@@ -505,6 +533,30 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
       if (current === wanted) return page;
     }
     return null;
+  }
+
+  private async switchWindowLabel(page: Page, file: string): Promise<string> {
+    const title = (await page.title().catch(() => "")).trim();
+    if (title && title.toLowerCase() !== file.toLowerCase()) return title;
+    const heading = await this.pageHeading(page);
+    if (heading && heading.toLowerCase() !== file.toLowerCase()) return heading;
+    return "";
+  }
+
+  private async pageHeading(page: Page): Promise<string> {
+    try {
+      const value = await Promise.race([
+        page.evaluate(`(() => {
+          const node = document.querySelector("#title, h1, h2, [role='heading']");
+          const text = node && (node.innerText || node.textContent) ? (node.innerText || node.textContent) : "";
+          return String(text).trim().split("\\n")[0].trim();
+        })()`).catch(() => ""),
+        new Promise<string>(resolve => setTimeout(() => resolve(""), 400))
+      ]);
+      return typeof value === "string" ? value.trim() : "";
+    } catch {
+      return "";
+    }
   }
 
   private listOpenPages(): Page[] {

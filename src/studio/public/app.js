@@ -70,6 +70,7 @@ function insertLine(line) {
   revealEditorCaret(next);
   noteCommitted();
   updateDirty();
+  scheduleWindowSuggest();
 }
 
 function revealEditorCaret(index) {
@@ -1115,11 +1116,214 @@ editor.addEventListener("input", () => {
   inputNoted = false;
   noteCommitted();
   updateDirty();
+  scheduleWindowSuggest();
+});
+editor.addEventListener("keydown", event => {
+  if (windowSuggest.hidden) return;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (!windowSuggestItems.length) return;
+    event.preventDefault();
+    setWindowSuggestIndex(windowSuggestIndex + (event.key === "ArrowDown" ? 1 : -1));
+    return;
+  }
+  if ((event.key === "Enter" || event.key === "Tab") && windowSuggestItems.length) {
+    event.preventDefault();
+    applyWindowFile(windowSuggestItems[windowSuggestIndex].file);
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    hideWindowSuggest();
+  }
+});
+editor.addEventListener("keyup", event => {
+  if (!windowSuggest.hidden && (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter" || event.key === "Tab" || event.key === "Escape")) return;
+  scheduleWindowSuggest();
+});
+editor.addEventListener("click", () => scheduleWindowSuggest());
+editor.addEventListener("scroll", () => {
+  if (!windowSuggest.hidden) positionWindowSuggest();
+});
+editor.addEventListener("blur", () => {
+  window.setTimeout(() => {
+    if (document.activeElement === editor) return;
+    if (windowSuggest.contains(document.activeElement)) return;
+    hideWindowSuggest();
+  }, 120);
 });
 noteCommitted();
 document.addEventListener("click", event => {
   if (!menu.contains(event.target)) hideMenu();
+  if (!windowSuggest.hidden && event.target !== editor && !windowSuggest.contains(event.target)) hideWindowSuggest();
 });
+
+const windowSuggest = document.getElementById("window-suggest");
+let windowSuggestItems = [];
+let windowSuggestIndex = 0;
+let windowSuggestToken = 0;
+let windowSuggestTimer = 0;
+
+function scheduleWindowSuggest() {
+  window.clearTimeout(windowSuggestTimer);
+  windowSuggestTimer = window.setTimeout(() => {
+    void refreshWindowSuggest();
+  }, 80);
+}
+
+async function refreshWindowSuggest() {
+  const caret = editor.selectionStart ?? 0;
+  const context = window.SolidFlowWindows.switchFileContext(editor.value, caret);
+  if (!context || document.activeElement !== editor) {
+    hideWindowSuggest();
+    return;
+  }
+  const token = ++windowSuggestToken;
+  let payload = { connected: false, windows: [] };
+  try {
+    const response = await fetch("/api/windows");
+    payload = await response.json();
+  } catch {
+    payload = { connected: false, windows: [] };
+  }
+  if (token !== windowSuggestToken) return;
+  const still = window.SolidFlowWindows.switchFileContext(editor.value, editor.selectionStart ?? 0);
+  if (!still || document.activeElement !== editor) {
+    hideWindowSuggest();
+    return;
+  }
+  const query = still.typed.toLowerCase();
+  const windows = (payload.windows || []).filter(item => {
+    if (!query) return true;
+    const file = String(item.file || "").toLowerCase();
+    const label = String(item.label || "").toLowerCase();
+    return file.includes(query) || label.includes(query);
+  });
+  renderWindowSuggest(windows, Boolean(payload.connected), still);
+}
+
+function renderWindowSuggest(windows, connected, context) {
+  windowSuggest.replaceChildren();
+  windowSuggestItems = windows;
+  windowSuggestIndex = 0;
+  if (!windows.length) {
+    const note = document.createElement("div");
+    note.className = "hint";
+    note.textContent = connected
+      ? (context.typed ? "No open window matches." : "No windows are open in the connected app.")
+      : "Connect the app to list its windows.";
+    windowSuggest.append(note);
+  } else {
+    windows.forEach((item, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.setAttribute("role", "option");
+      const name = document.createElement("span");
+      name.className = "window-file";
+      name.textContent = item.file;
+      button.append(name);
+      if (item.label) {
+        const label = document.createElement("span");
+        label.className = "window-label";
+        label.textContent = item.label;
+        button.append(label);
+      }
+      button.addEventListener("mousedown", event => {
+        event.preventDefault();
+        applyWindowFile(item.file);
+      });
+      button.addEventListener("mouseenter", () => setWindowSuggestIndex(index));
+      windowSuggest.append(button);
+    });
+  }
+  windowSuggest.hidden = false;
+  positionWindowSuggest();
+  setWindowSuggestIndex(0);
+}
+
+function hideWindowSuggest() {
+  windowSuggestToken += 1;
+  window.clearTimeout(windowSuggestTimer);
+  windowSuggest.hidden = true;
+  windowSuggest.replaceChildren();
+  windowSuggestItems = [];
+}
+
+function setWindowSuggestIndex(index) {
+  const buttons = windowSuggest.querySelectorAll("button");
+  if (!buttons.length) return;
+  windowSuggestIndex = (index + buttons.length) % buttons.length;
+  buttons.forEach((button, i) => {
+    button.classList.toggle("active", i === windowSuggestIndex);
+    button.setAttribute("aria-selected", i === windowSuggestIndex ? "true" : "false");
+  });
+  buttons[windowSuggestIndex].scrollIntoView({ block: "nearest" });
+}
+
+function applyWindowFile(file) {
+  const context = window.SolidFlowWindows.switchFileContext(editor.value, editor.selectionStart ?? 0);
+  if (!context) return;
+  pushHistory("insert");
+  const insert = window.SolidFlowWindows.yamlFileValue(file);
+  editor.value = editor.value.slice(0, context.from) + insert + editor.value.slice(context.to);
+  const caret = context.from + insert.length;
+  editor.focus({ preventScroll: true });
+  editor.setSelectionRange(caret, caret);
+  revealEditorCaret(caret);
+  noteCommitted();
+  updateDirty();
+  hideWindowSuggest();
+}
+
+function positionWindowSuggest() {
+  const point = editorCaretPoint(editor.selectionStart ?? 0);
+  const lineHeight = parseFloat(getComputedStyle(editor).lineHeight) || 21;
+  const margin = 8;
+  windowSuggest.style.left = "0px";
+  windowSuggest.style.top = "0px";
+  const width = windowSuggest.offsetWidth || 280;
+  const height = windowSuggest.offsetHeight || 40;
+  let left = point.x;
+  let top = point.y + lineHeight + 2;
+  if (left + width > window.innerWidth - margin) left = window.innerWidth - width - margin;
+  if (left < margin) left = margin;
+  if (top + height > window.innerHeight - margin) top = Math.max(margin, point.y - height - 4);
+  windowSuggest.style.left = left + "px";
+  windowSuggest.style.top = top + "px";
+}
+
+function editorCaretPoint(index) {
+  const style = getComputedStyle(editor);
+  const mirror = document.createElement("div");
+  mirror.setAttribute("aria-hidden", "true");
+  mirror.style.cssText = "position:fixed;visibility:hidden;left:0;top:0;white-space:pre-wrap;overflow-wrap:break-word;overflow:hidden;pointer-events:none";
+  mirror.style.boxSizing = style.boxSizing;
+  mirror.style.width = editor.clientWidth + "px";
+  mirror.style.padding = style.padding;
+  mirror.style.borderTopWidth = style.borderTopWidth;
+  mirror.style.borderRightWidth = style.borderRightWidth;
+  mirror.style.borderBottomWidth = style.borderBottomWidth;
+  mirror.style.borderLeftWidth = style.borderLeftWidth;
+  mirror.style.borderStyle = "solid";
+  mirror.style.font = style.font;
+  mirror.style.lineHeight = style.lineHeight;
+  mirror.style.letterSpacing = style.letterSpacing;
+  mirror.style.tabSize = style.tabSize;
+  mirror.textContent = editor.value.slice(0, index);
+  const mark = document.createElement("span");
+  mark.textContent = "\u200b";
+  mirror.append(mark);
+  document.body.append(mirror);
+  const markRect = mark.getBoundingClientRect();
+  const mirrorRect = mirror.getBoundingClientRect();
+  mirror.remove();
+  const editorRect = editor.getBoundingClientRect();
+  const borderLeft = parseFloat(style.borderLeftWidth) || 0;
+  const borderTop = parseFloat(style.borderTopWidth) || 0;
+  return {
+    x: editorRect.left + borderLeft + (markRect.left - mirrorRect.left) - editor.scrollLeft,
+    y: editorRect.top + borderTop + (markRect.top - mirrorRect.top) - editor.scrollTop
+  };
+}
 
 const LAYOUT_KEY = "solidFlow.studio.layout";
 const layout = { side: 380, flows: 240, log: 280, preview: 220 };

@@ -1,6 +1,6 @@
 import type { LocatorMatch, DriverKind, DeviceInfo } from "../types.js";
 import type { Page } from "playwright-core";
-import type { WindowQuery } from "./window-target.js";
+import type { SwitchWindowChoice, WindowQuery } from "./window-target.js";
 
 export type DriverContext = {
   appId: string;
@@ -26,6 +26,8 @@ export interface AutomationDriver {
   switchToMain(): Promise<void>;
   /** Select a window that is already open, or wait until that window is visible. */
   switchToWindow(query: WindowQuery, timeoutMs: number): Promise<void>;
+  /** Pages the connected app has open, by file name. */
+  listSwitchWindows(): Promise<SwitchWindowChoice[]>;
   /** The focused native window is the web page commands are running against. */
   webWindowFocused(): boolean;
   /** Drop the native dialog target after it has closed. */

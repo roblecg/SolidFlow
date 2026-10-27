@@ -702,6 +702,12 @@ html[data-edge="top-right"], html[data-edge="bottom-left"] { cursor: nesw-resize
 }
 .menu button:disabled, .flyout button:disabled { color: var(--muted); cursor: not-allowed; }
 .menu .hint, .flyout .hint { padding: 6px 10px 8px; color: var(--accent-ink); font-size: 12px; font-weight: 650; }
+.menu.window-suggest { min-width: 280px; max-width: 440px; max-height: 240px; z-index: 30; }
+.menu.window-suggest button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.menu.window-suggest button.active,
+.menu.window-suggest button:hover { background: #fff4ea; }
+.menu.window-suggest .window-file { font-family: Consolas, "Cascadia Mono", ui-monospace, monospace; font-size: 13px; color: var(--text); }
+.menu.window-suggest .window-label { font-size: 12px; color: var(--muted); font-weight: 400; }
 
 .folder-modal {
   position: fixed;

@@ -3,6 +3,12 @@ import { FlowError } from "../types.js";
 /** Outer window rectangle from the native helper. `dpi` is the window DPI, 96 at 100%. */
 export type ScreenBounds = { x: number; y: number; width: number; height: number; dpi?: number };
 
+export type SwitchWindowChoice = {
+  file: string;
+  /** Document title or the heading in that window, when it differs from the file name. */
+  label: string;
+};
+
 export type WindowQuery = {
   file?: string;
   title?: string;
@@ -18,6 +24,11 @@ export function urlMatchesFile(url: string, file: string): boolean {
   const wanted = fileName(file);
   if (!wanted) return false;
   return fileName(urlPath(url)) === wanted;
+}
+
+/** The page file a switchToWindow file: value should use, keeping its original case. */
+export function pageFileName(url: string): string {
+  return segment(urlPath(url));
 }
 
 export function parseWindowQuery(value: unknown): WindowQuery {
@@ -120,9 +131,12 @@ function urlPath(url: string): string {
   }
 }
 
+function segment(path: string): string {
+  return path.trim().replace(/\\/g, "/").split("/").pop() ?? "";
+}
+
 function fileName(path: string): string {
-  const base = path.trim().replace(/\\/g, "/").split("/").pop() ?? "";
-  return base.toLowerCase();
+  return segment(path).toLowerCase();
 }
 
 function quote(value: string): string {

@@ -4,6 +4,7 @@ import {
   describeWindowQuery,
   hwndForBounds,
   outerBounds,
+  pageFileName,
   parseWindowQuery,
   urlMatchesFile
 } from "../src/driver/window-target.js";
@@ -16,6 +17,8 @@ describe("window target", () => {
     expect(urlMatchesFile("http://127.0.0.1:5173/AppUpdate.html?dev=1", "appupdate.html")).toBe(true);
     expect(urlMatchesFile("file:///app/JobList.html", "Proxy settings")).toBe(false);
     expect(urlMatchesFile("file:///app/OrgLogin.html", "OrgLogin.html")).toBe(true);
+    expect(pageFileName("file:///C:/Program%20Files/Kyocera/renderer/AppUpdate.html")).toBe("AppUpdate.html");
+    expect(pageFileName("http://127.0.0.1:5173/AppUpdate.html?dev=1")).toBe("AppUpdate.html");
   });
 
   it("reads a file, a caption, or a heading", () => {

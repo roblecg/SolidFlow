@@ -263,6 +263,18 @@ export async function publishRunPreview(automation: AutomationDriver): Promise<v
   }
 }
 
+export async function listSwitchWindows(): Promise<{
+  connected: boolean;
+  windows: { file: string; label: string }[];
+}> {
+  if (!driver) return { connected: false, windows: [] };
+  try {
+    return { connected: true, windows: await driver.listSwitchWindows() };
+  } catch {
+    return { connected: true, windows: [] };
+  }
+}
+
 export async function snapshot(): Promise<StudioSnapshot> {
   if (!driver || !target) {
     if (previewHold?.image) return previewHold;

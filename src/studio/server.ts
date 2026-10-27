@@ -48,6 +48,7 @@ import {
   setRecordingPaused,
   snapshot,
   SessionCancelledError,
+  listSwitchWindows,
   startSession,
   stopSession,
   whenSessionIdle
@@ -421,6 +422,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     await stopSession();
     appLog("info", "Disconnected device session");
     sendJson(res, 200, { connected: false, target: null, nodes: [] });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/windows") {
+    sendJson(res, 200, await listSwitchWindows());
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/session") {
