@@ -8,6 +8,7 @@ import { PNG } from "pngjs";
 import type { Page } from "playwright-core";
 import { FlowError } from "../types.js";
 import { packageRoot } from "../util/paths.js";
+import type { ScreenBounds } from "./window-target.js";
 
 export type Rect = { x: number; y: number; width: number; height: number };
 
@@ -36,7 +37,7 @@ export type NativeFrame = FrameLayout & { png: Buffer };
 
 export type NativeApp = { pid: number; appPath: string; hwnd?: string };
 
-export type NativePopup = { hwnd: string; title: string; className?: string };
+export type NativePopup = { hwnd: string; title: string; className?: string; bounds?: ScreenBounds };
 
 export type PixelHint = { width: number; height: number; cssWidth: number; cssHeight: number };
 
@@ -248,11 +249,26 @@ export async function listNativePopups(app: NativeApp): Promise<NativePopup[]> {
   }
   return response.windows
     .filter(window => typeof window.hwnd === "string" && window.hwnd && typeof window.title === "string")
-    .map(window => ({
-      hwnd: window.hwnd as string,
-      title: window.title as string,
-      ...(typeof window.className === "string" && window.className ? { className: window.className } : {})
-    }));
+    .map(window => {
+      const bounds = finiteBounds(window.bounds);
+      return {
+        hwnd: window.hwnd as string,
+        title: window.title as string,
+        ...(typeof window.className === "string" && window.className ? { className: window.className } : {}),
+        ...(bounds ? { bounds } : {})
+      };
+    });
+}
+
+function finiteBounds(value: { x?: number; y?: number; width?: number; height?: number; dpi?: number } | undefined): ScreenBounds | undefined {
+  if (!value) return undefined;
+  const x = Number(value.x);
+  const y = Number(value.y);
+  const width = Number(value.width);
+  const height = Number(value.height);
+  if (![x, y, width, height].every(Number.isFinite) || width < 1 || height < 1) return undefined;
+  const dpi = Number(value.dpi);
+  return { x, y, width, height, ...(Number.isFinite(dpi) && dpi > 0 ? { dpi } : {}) };
 }
 
 export async function invokeNativeControl(app: NativeApp, name: string, timeoutMs = 0): Promise<void> {
@@ -405,7 +421,12 @@ type HelperResponse = {
   popup?: boolean;
   visible?: boolean;
   text?: string;
-  windows?: { hwnd?: string; title?: string; className?: string }[];
+  windows?: {
+    hwnd?: string;
+    title?: string;
+    className?: string;
+    bounds?: { x?: number; y?: number; width?: number; height?: number; dpi?: number };
+  }[];
   controls?: { name?: string; kind?: string; bounds?: Rect }[];
 };
 

@@ -26,6 +26,7 @@ import { defaultLocatorResolver } from "../driver/locator.js";
 import type { AutomationDriver } from "../driver/types.js";
 import { loadConfigFromAncestors, resolveAppPath, shellAllowed } from "../config.js";
 import { interpolateEnv } from "../util/ids.js";
+import { parseWindowQuery, type WindowQuery } from "../driver/window-target.js";
 import { uniqueRunFolder } from "../report/run-folder.js";
 import { reportRoot as workspaceReportRoot } from "../studio/workspace.js";
 import { writeReports } from "../report/index.js";
@@ -338,6 +339,19 @@ async function executeStep(
   }
 }
 
+function announceOnPage(driver: AutomationDriver): boolean {
+  return !driver.nativeApp()?.hwnd || driver.webWindowFocused();
+}
+
+function windowQuery(parsed: ReturnType<typeof parseStep>, env: Record<string, string>): WindowQuery {
+  if (parsed.kind === "simple") {
+    throw new FlowError("switchToWindow needs a file name, a window title, or the heading in that window.");
+  }
+  const query = parseWindowQuery(parsed.value);
+  const fill = (value: string | undefined) => (value === undefined ? undefined : interpolateEnv(value, env));
+  return { file: fill(query.file), title: fill(query.title), text: fill(query.text), any: query.any };
+}
+
 function popupTimeout(value: unknown): number {
   const raw =
     typeof value === "number"
@@ -412,12 +426,17 @@ async function executeStepBody(
     return;
   }
 
-  if (name === "waitForPopup" || name === "switchToMain") {
+  if (name === "waitForPopup" || name === "switchToMain" || name === "switchToWindow") {
     if (!state.driver) await ensureDriver(state, flow, ctx);
     const driver = state.driver!;
     if (name === "switchToMain") await driver.switchToMain();
-    else await driver.waitForPopup(popupTimeout(parsed.kind === "simple" ? undefined : parsed.value));
-    if (!driver.nativeApp()?.hwnd) await focusAndAnnounce(driver, name, ctx.paceMs);
+    else if (name === "switchToWindow") {
+      const value = parsed.kind === "simple" ? undefined : parsed.value;
+      await driver.switchToWindow(windowQuery(parsed, state.env), popupTimeout(value));
+    } else {
+      await driver.waitForPopup(popupTimeout(parsed.kind === "simple" ? undefined : parsed.value));
+    }
+    if (announceOnPage(driver)) await focusAndAnnounce(driver, name, ctx.paceMs);
     return;
   }
 
@@ -581,7 +600,7 @@ async function executeStepBody(
   if (!state.driver) await ensureDriver(state, flow, ctx);
   const driver = state.driver!;
   const page = driver.getPage();
-  if (!driver.nativeApp()?.hwnd) await focusAndAnnounce(driver, name, ctx.paceMs);
+  if (announceOnPage(driver)) await focusAndAnnounce(driver, name, ctx.paceMs);
 
   const strVal = (v: unknown) => interpolateEnv(String(v), state.env);
 
@@ -983,6 +1002,8 @@ async function actOnWindow(driver: AutomationDriver, action: CaptionAction): Pro
 }
 
 function activeNativeWindow(driver: AutomationDriver): NativeApp | null {
+  // A web dialog keeps its handle for the title bar. Its buttons are on the page.
+  if (driver.webWindowFocused()) return null;
   const native = driver.nativeApp();
   if (!native?.hwnd) return null;
   return native;

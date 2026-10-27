@@ -173,6 +173,23 @@ export function clearTestRuns(): void {
   testRuns.length = 0;
 }
 
+function switchWindowLabel(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "Switch to window";
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (typeof parsed === "string") return `Switch to window "${parsed}"`;
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as { file?: unknown; title?: unknown; text?: unknown };
+      const name = [record.file, record.title, record.text].find(item => typeof item === "string" && item);
+      if (typeof name === "string") return `Switch to window "${name}"`;
+    }
+  } catch {
+    // The log line is already plain text.
+  }
+  return `Switch to window "${trimmed.replace(/^"|"$/g, "")}"`;
+}
+
 function windowControlLabel(value: string): string | null {
   const labels: Record<string, string> = {
     "window:close": "Close",
@@ -190,6 +207,9 @@ export function formatStepLabel(command: string): string {
   if (command === "clearState") return "Clear app state";
   if (command === "waitForPopup" || command.startsWith("waitForPopup")) return "Wait for the next window";
   if (command === "switchToMain") return "Switch to the original window";
+  if (command === "switchToWindow" || command.startsWith("switchToWindow")) {
+    return switchWindowLabel(command.slice("switchToWindow".length).replace(/^:\s*/, ""));
+  }
   const match = /^(\w+):\s*([\s\S]*)$/.exec(command);
   if (!match) return command;
   const name = match[1] ?? command;

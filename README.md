@@ -70,6 +70,18 @@ appPath: "C:/Program Files/Kyocera/Kyocera Cloud Print and Scan/JcsUiAgent/JcsUi
 - launchApp
 ```
 
+Print status, Update available, and Proxy settings can be open together. `switchToWindow` selects one by its page file, its caption, or a heading in the page. `switchToMain` still returns to the window that was open at connect. `waitForPopup` still follows the next new window.
+
+```yaml
+- switchToWindow:
+    file: ProxySettings.html
+- tapOn: "OK"
+- switchToWindow:
+    text: "Update available"
+- tapOn: "Skip this version"
+- switchToMain
+```
+
 - `SOLIDFLOW_ALLOW_SHELL=1` — enable `executeShellCommand` (argv only, cwd confined)
 - `SOLIDFLOW_REPORT_DIR` — optional override. By default every run is saved in the workspace `test-results` folder.
 

@@ -1,5 +1,6 @@
 import type { LocatorMatch, DriverKind, DeviceInfo } from "../types.js";
 import type { Page } from "playwright-core";
+import type { WindowQuery } from "./window-target.js";
 
 export type DriverContext = {
   appId: string;
@@ -23,6 +24,10 @@ export interface AutomationDriver {
   takeScreenshot(name: string): Promise<string>;
   waitForPopup(timeoutMs: number): Promise<void>;
   switchToMain(): Promise<void>;
+  /** Select a window that is already open, or wait until that window is visible. */
+  switchToWindow(query: WindowQuery, timeoutMs: number): Promise<void>;
+  /** The focused native window is the web page commands are running against. */
+  webWindowFocused(): boolean;
   /** Drop the native dialog target after it has closed. */
   releaseClosedNativeWindow(): Promise<void>;
   /** Process of the app under test. Its window title bar is not the SolidFlow studio window. */

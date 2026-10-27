@@ -1,6 +1,7 @@
 import type { Page } from "playwright-core";
 import { DriverNotAvailableError, type DriverKind, type DeviceInfo } from "../types.js";
 import type { AutomationDriver, DriverContext } from "./types.js";
+import type { WindowQuery } from "./window-target.js";
 
 export class UnavailableDriver implements AutomationDriver {
   constructor(readonly kind: DriverKind) {}
@@ -37,6 +38,14 @@ export class UnavailableDriver implements AutomationDriver {
 
   async switchToMain(): Promise<void> {
     throw new DriverNotAvailableError(this.kind);
+  }
+
+  async switchToWindow(_query: WindowQuery, _timeoutMs: number): Promise<void> {
+    throw new DriverNotAvailableError(this.kind);
+  }
+
+  webWindowFocused(): boolean {
+    return false;
   }
 
   async releaseClosedNativeWindow(): Promise<void> {}

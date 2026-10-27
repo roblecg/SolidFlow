@@ -10,10 +10,13 @@ import { revealNativeWindow, stopNativeFrameHost } from "./native-frame.js";
 import { PlaywrightBaseDriver } from "./playwright-base.js";
 import { getFreePort } from "../util/port.js";
 import {
+  electronAttachError,
   electronExitMessage,
   electronLaunchArgs,
   electronWindowTimeoutMessage,
-  isAppPageUrl
+  isAppPageUrl,
+  isKcpsDesktop,
+  preferKcpsPageUrl
 } from "./electron-app.js";
 
 const execFileAsync = promisify(execFile);
@@ -26,9 +29,11 @@ export class ElectronDriver extends PlaywrightBaseDriver {
   private debugPort = 0;
   private userDataDir = "";
   private ready = false;
+  private stopped = false;
   private exitReason: string | null = null;
 
   async connect(ctx: DriverContext): Promise<void> {
+    this.stopped = false;
     this.ctx = ctx;
     if (!ctx.appPath) {
       throw new Error("Electron driver requires appPath on the flow (or SOLIDFLOW_APP_PATH).");
@@ -61,12 +66,17 @@ export class ElectronDriver extends PlaywrightBaseDriver {
       await this.revealMainWindow();
       await this.rememberNativePopups();
     } catch (err) {
-      await this.disconnect();
+      const message = err instanceof Error ? err.message : String(err);
+      await this.disconnect().catch(() => {});
+      const closed = electronAttachError(message);
+      if (closed) throw new Error(closed);
       throw err;
     }
   }
 
   async disconnect(): Promise<void> {
+    if (this.stopped) return;
+    this.stopped = true;
     await this.stopProcess();
     stopNativeFrameHost();
     // Electron ignores Playwright's close while a window refuses to close, which leaves the CDP socket open.
@@ -119,7 +129,13 @@ export class ElectronDriver extends PlaywrightBaseDriver {
   }
 
   private preferAppPage(): void {
-    const preferred = this.openPages().find(page => isAppPageUrl(page.url()));
+    const pages = this.openPages();
+    const urls = pages.map(page => page.url());
+    const preferredUrl =
+      this.ctx?.appPath && isKcpsDesktop(this.ctx.appPath)
+        ? preferKcpsPageUrl(urls)
+        : urls.find(url => isAppPageUrl(url));
+    const preferred = preferredUrl ? pages.find(page => page.url() === preferredUrl) : undefined;
     if (preferred) this.usePage(preferred);
   }
 

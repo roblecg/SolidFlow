@@ -48,6 +48,34 @@ export type StudioSnapshot = {
 
 let driver: AutomationDriver | null = null;
 let target: "app" | null = null;
+let sessionEpoch = 0;
+let sessionTail: Promise<void> = Promise.resolve();
+
+/** Connect and disconnect stay in order. A second click cannot close the debug port mid-attach. */
+function enqueueSession(task: () => Promise<void>): Promise<void> {
+  const run = sessionTail.then(task, task);
+  sessionTail = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+export async function whenSessionIdle(): Promise<void> {
+  for (;;) {
+    const pending = sessionTail;
+    await pending;
+    if (sessionTail === pending) return;
+  }
+}
+
+export class SessionCancelledError extends Error {
+  constructor() {
+    super("The connection was closed.");
+    this.name = "SessionCancelledError";
+  }
+}
+
 let previewHold: StudioSnapshot | null = null;
 let previewSeq = 0;
 let lastLayout: FrameLayout | null = null;
@@ -62,22 +90,39 @@ export function sessionTarget(): "app" | null {
   return target;
 }
 
-export async function startSession(flowAppPath?: string, flowDriver?: DriverKind): Promise<void> {
-  await stopSession();
+export function startSession(flowAppPath?: string, flowDriver?: DriverKind): Promise<void> {
+  const ticket = ++sessionEpoch;
+  return enqueueSession(() => openSession(ticket, flowAppPath, flowDriver));
+}
+
+async function openSession(ticket: number, flowAppPath?: string, flowDriver?: DriverKind): Promise<void> {
+  await stopSessionNow();
+  if (ticket !== sessionEpoch) throw new SessionCancelledError();
   const config = workspaceConfig();
   const screenshotDir = join(reportRoot(), "studio");
   const appPath = flowAppPath || resolveAppPath(config);
   if (!appPath) {
     throw new Error("Set appPath in the flow to the exe you want to connect.");
   }
-  driver = createDriver(inferDriver(flowDriver, appPath));
-  await driver.connect({
-    appId: basename(appPath),
-    locale: "en",
-    appPath,
-    headless: false,
-    screenshotDir
-  });
+  const next = createDriver(inferDriver(flowDriver, appPath));
+  try {
+    await next.connect({
+      appId: basename(appPath),
+      locale: "en",
+      appPath,
+      headless: false,
+      screenshotDir
+    });
+  } catch (err) {
+    await next.disconnect().catch(() => {});
+    if (ticket !== sessionEpoch) throw new SessionCancelledError();
+    throw err;
+  }
+  if (ticket !== sessionEpoch) {
+    await next.disconnect().catch(() => {});
+    throw new SessionCancelledError();
+  }
+  driver = next;
   target = "app";
   const page = driver.getPage();
   await page.addInitScript(RECORDER_INIT_SCRIPT).catch(() => {});
@@ -184,14 +229,21 @@ export async function setRecordingPaused(paused: boolean): Promise<void> {
   })()`).catch(() => {});
 }
 
-export async function stopSession(): Promise<void> {
-  if (driver) {
-    await driver.disconnect().catch(() => {});
-  }
+export function stopSession(): Promise<void> {
+  const ticket = ++sessionEpoch;
+  return enqueueSession(async () => {
+    if (ticket !== sessionEpoch) return;
+    await stopSessionNow();
+  });
+}
+
+async function stopSessionNow(): Promise<void> {
+  const current = driver;
   driver = null;
   target = null;
   previewHold = null;
   lastLayout = null;
+  if (current) await current.disconnect().catch(() => {});
 }
 
 export function clearRunPreview(): void {
@@ -283,10 +335,13 @@ async function frameOf(
   const hint = await pagePixelHint(page);
   // The connected app from the flow's appPath, not the SolidFlow studio window.
   const native = await previewWindow(automation.nativeApp(), page);
-  const [hierarchy, frame] = await Promise.all([
+  const webWindow = automation.webWindowFocused();
+  const [hierarchy, captured] = await Promise.all([
     captureHierarchy(page).catch(() => null),
     native ? captureNativeFrame(native, hint) : Promise.resolve(null)
   ]);
+  let frame = captured;
+  if (frame?.popup && webWindow) frame = { ...frame, popup: false };
   let image = buffer;
   let layout: FrameLayout | null = null;
   if (frame?.popup) {

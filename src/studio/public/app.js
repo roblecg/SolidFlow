@@ -583,17 +583,26 @@ function appendRecorded(line) {
   updateDirty();
 }
 
+let connecting = false;
+
 async function connect() {
+  if (connecting) return;
+  connecting = true;
   setStatus("Connecting app…");
   try {
     if (!currentPath) {
       setStatus("Open a flow and set appPath to the exe.", "bad");
       return;
     }
-    await api("/api/session", {
+    const started = await api("/api/session", {
       method: "POST",
       body: JSON.stringify({ path: currentPath, content: editor.value })
     });
+    if (started.cancelled) {
+      setStatus("Disconnected");
+      return;
+    }
+    setStatus("Connected", "ok");
     await setMode(mode);
     if (mode === "inspect") {
       const snap = await api("/api/session");
@@ -601,6 +610,8 @@ async function connect() {
     }
   } catch (err) {
     setStatus(err.message, "bad");
+  } finally {
+    connecting = false;
   }
 }
 

@@ -46,6 +46,10 @@ describe("studio files", () => {
   it("formats test log lines like a step list", () => {
     expect(formatStepLabel("waitForPopup")).toBe("Wait for the next window");
     expect(formatStepLabel("switchToMain")).toBe("Switch to the original window");
+    expect(formatStepLabel('switchToWindow: {"file":"ProxySettings.html"}')).toBe(
+      'Switch to window "ProxySettings.html"'
+    );
+    expect(formatStepLabel('switchToWindow: "Update available"')).toBe('Switch to window "Update available"');
     expect(formatStepLabel('tapOn: "Sign in"')).toBe('Tap on "Sign in"');
     expect(formatStepLabel('tapOn: "window:close"')).toBe("Tap on Close");
     expect(formatStepLabel('doubleTapOn: "window:title"')).toBe("Double tap the window title bar");

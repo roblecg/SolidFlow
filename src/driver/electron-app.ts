@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { urlMatchesFile } from "./window-target.js";
 
 const ELECTRON_MARKERS = [
   "chrome_100_percent.pak",
@@ -25,6 +26,18 @@ export function isKcpsDesktop(appPath: string): boolean {
   const name = basename(appPath).toLowerCase();
   if (name === "jcsuiagent.exe") return true;
   return basename(dirname(appPath)).toLowerCase() === "jcsuiagent";
+}
+
+/** Pages the KCPS main BrowserWindow navigates between. Dialogs are separate files. */
+const KCPS_MAIN_PAGE_FILES = ["JobList.html", "OrgLogin.html", "PasswordLogin.html", "OidcLogin.html"];
+
+export function isKcpsMainPageUrl(url: string): boolean {
+  return KCPS_MAIN_PAGE_FILES.some(file => urlMatchesFile(url, file));
+}
+
+/** Prefer the print-status or login page when Update or Proxy settings is already open. */
+export function preferKcpsPageUrl(urls: readonly string[]): string | undefined {
+  return urls.find(url => isKcpsMainPageUrl(url)) ?? urls.find(url => isAppPageUrl(url));
 }
 
 /** Installer builds are named cloudprintscan_*.exe. The desktop UI is JcsUiAgent.exe. */
@@ -62,6 +75,14 @@ export function electronExitMessage(appPath: string, code: number | null, signal
     `${base} Close any Kyocera Cloud Print and Scan tray icon first. ` +
     "The window also waits for StatusMonitorSvc at http://127.0.0.1:5570."
   );
+}
+
+/** Playwright reports our own socket close as a connectOverCDP failure. Say what happened instead. */
+export function electronAttachError(message: string): string | undefined {
+  if (message.includes("solidFlow disconnect")) {
+    return "The app connection closed before SolidFlow finished attaching to it.";
+  }
+  return undefined;
 }
 
 export function electronWindowTimeoutMessage(appPath: string, port: number): string {

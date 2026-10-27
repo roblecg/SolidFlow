@@ -96,6 +96,21 @@ describe("local page flow", () => {
     }
   });
 
+  it("switches among windows that are already open and still returns to the original page", async () => {
+    const reportDir = mkdtempSync(join(tmpdir(), "solidflow-results-"));
+    try {
+      const report = await runFlowFile(join(pagesDir, "windows.yaml"), {
+        reportDir,
+        headless: true,
+        cwd: pagesDir,
+        pageUrl: pathToFileURL(join(pagesDir, "windows-host.html")).href
+      });
+      expect(report.status).toBe("passed");
+    } finally {
+      rmSync(reportDir, { recursive: true, force: true });
+    }
+  });
+
   it("follows a popup window and returns to the original page", async () => {
     const reportDir = mkdtempSync(join(tmpdir(), "solidflow-results-"));
     try {

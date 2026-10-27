@@ -3,11 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  electronAttachError,
   electronLaunchArgs,
   electronWindowTimeoutMessage,
   isAppPageUrl,
   isElectronApp,
-  kcpsInstallerHint
+  isKcpsMainPageUrl,
+  kcpsInstallerHint,
+  preferKcpsPageUrl
 } from "../src/driver/electron-app.js";
 import { createDriver, inferDriver } from "../src/driver/registry.js";
 import { validateFlowMeta } from "../src/flow/validate.js";
@@ -70,7 +73,25 @@ describe("electron app detection", () => {
     expect(isAppPageUrl("about:blank")).toBe(false);
     expect(isAppPageUrl("devtools://devtools/bundled/inspector.html")).toBe(false);
     expect(isAppPageUrl("file:///app/OrgLogin.html")).toBe(true);
+    expect(isKcpsMainPageUrl("file:///C:/Program%20Files/Kyocera/renderer/JobList.html")).toBe(true);
+    expect(isKcpsMainPageUrl("file:///app/ProxySettings.html")).toBe(false);
+    expect(
+      preferKcpsPageUrl([
+        "devtools://devtools/bundled/inspector.html",
+        "file:///app/AppUpdate.html",
+        "file:///app/JobList.html"
+      ])
+    ).toBe("file:///app/JobList.html");
+    expect(preferKcpsPageUrl(["file:///app/AppUpdate.html", "file:///app/ProxySettings.html"])).toBe(
+      "file:///app/AppUpdate.html"
+    );
     expect(electronWindowTimeoutMessage("C:/Kyocera/JcsUiAgent/JcsUiAgent.exe", 55758)).toMatch(/5570/);
     expect(electronWindowTimeoutMessage("C:/apps/Other.exe", 55758)).not.toMatch(/5570/);
+    expect(
+      electronAttachError(
+        "browserType.connectOverCDP: browserType.connectOverCDP: browser.close: solidFlow disconnect"
+      )
+    ).toMatch(/finished attaching/);
+    expect(electronAttachError("CDP did not become ready on port 9222")).toBeUndefined();
   });
 });

@@ -1,0 +1,23 @@
+appId: page.demo
+name: Several windows
+driver: chromium
+locale: en
+---
+- launchApp
+- tapOn: "Open update"
+- tapOn: "Open proxy"
+- switchToWindow:
+    file: update.html
+- assertVisible: "Skip this version"
+- switchToWindow: "Direct connection"
+- assertVisible: "OK"
+- switchToWindow:
+    title: "Print status"
+- assertVisible: "Open update"
+- switchToWindow:
+    file: proxy.html
+    timeout: 5000
+- assertVisible: "Direct connection"
+- switchToMain
+- assertVisible: "Open proxy"
+- stopApp

@@ -47,8 +47,10 @@ import {
   publishRunPreview,
   setRecordingPaused,
   snapshot,
+  SessionCancelledError,
   startSession,
-  stopSession
+  stopSession,
+  whenSessionIdle
 } from "./session.js";
 
 const STUDIO_PACE_MS = 700;
@@ -262,14 +264,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       await writeFlow(body.path, content);
     }
     await setRecordingPaused(true);
-    const slot: DriverSlot = { current: borrowDriver() };
-    const config = workspaceConfig();
     const abort = new AbortController();
     runAbort = abort;
     liveRun.running = true;
     liveRun.log = [];
     liveRun.status = "running";
     liveRun.command = "Starting…";
+    const slot: DriverSlot = { current: null };
+    let borrowed = false;
+    const config = workspaceConfig();
     const runId = newRunId();
     const fileName = body.path.split("/").pop()?.replace(/\.ya?ml$/i, "") ?? body.path;
     let flowName = fileName;
@@ -284,6 +287,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     beginTestRun(runId, flowName, body.path, flowSections);
     appLog("info", `Run started: ${body.path}`);
     try {
+      await whenSessionIdle();
+      if (abort.signal.aborted) {
+        finishTestRun(runId, "stopped");
+        appLog("warn", `Run stopped: ${body.path}`);
+        liveRun.status = "stopped";
+        sendJson(res, 200, { status: "stopped", steps: [], sections: [] });
+        return;
+      }
+      slot.current = borrowDriver();
+      borrowed = true;
       const report = await runFlowFile(resolveFlowPath(body.path), {
         reportDir: reportRoot(),
         cwd: workspaceRoot(),
@@ -328,7 +341,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     } finally {
       liveRun.running = false;
       runAbort = null;
-      adoptDriver(slot.current);
+      if (borrowed) adoptDriver(slot.current);
       clearRunPreview();
       await setRecordingPaused(false);
     }
@@ -391,7 +404,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     const flow = parseFlowContent(body.content, body.path || "flow");
-    await startSession(flow.appPath, flow.driver);
+    try {
+      await startSession(flow.appPath, flow.driver);
+    } catch (err) {
+      if (err instanceof SessionCancelledError) {
+        sendJson(res, 200, { cancelled: true, ...(await snapshot()) });
+        return;
+      }
+      throw err;
+    }
     appLog("info", "Connected app session");
     sendJson(res, 200, await snapshot());
     return;

@@ -312,11 +312,23 @@ namespace SolidFlow {
       foreach (IntPtr hwnd in popupHits) {
         if (!first) json.Append(',');
         first = false;
-        json.Append("{\"hwnd\":\"" + HwndText(hwnd) + "\",\"title\":" + JsonString(WindowTitle(hwnd)) + ",\"className\":" + JsonString(ClassNameOf(hwnd)) + "}");
+        json.Append("{\"hwnd\":\"" + HwndText(hwnd) + "\",\"title\":" + JsonString(WindowTitle(hwnd)) + ",\"className\":" + JsonString(ClassNameOf(hwnd)) + BoundsJson(hwnd) + "}");
       }
       popupHits = null;
       json.Append("]}");
       return json.ToString();
+    }
+
+    static string BoundsJson(IntPtr hwnd) {
+      RECT win;
+      if (!WindowRect(hwnd, out win)) return "";
+      int width = win.Right - win.Left;
+      int height = win.Bottom - win.Top;
+      if (width < 1 || height < 1) return "";
+      uint dpi = 96;
+      try { dpi = GetDpiForWindow(hwnd); } catch { dpi = 96; }
+      if (dpi == 0) dpi = 96;
+      return ",\"bounds\":{\"x\":" + win.Left + ",\"y\":" + win.Top + ",\"width\":" + width + ",\"height\":" + height + ",\"dpi\":" + dpi + "}";
     }
 
     static bool IsPopup(IntPtr hwnd, IntPtr main, int procId, string appPath) {
