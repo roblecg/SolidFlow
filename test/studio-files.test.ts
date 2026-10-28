@@ -50,6 +50,10 @@ describe("studio files", () => {
       'Switch to window "ProxySettings.html"'
     );
     expect(formatStepLabel('switchToWindow: "Update available"')).toBe('Switch to window "Update available"');
+    expect(formatStepLabel('trayMenu: "Proxy settings"')).toBe('Open "Proxy settings" from the taskbar');
+    expect(formatStepLabel('trayMenu: {"app":"Cursor","item":"Settings"}')).toBe(
+      'Open "Settings" from Cursor on the taskbar'
+    );
     expect(formatStepLabel('tapOn: "Sign in"')).toBe('Tap on "Sign in"');
     expect(formatStepLabel('tapOn: "window:close"')).toBe("Tap on Close");
     expect(formatStepLabel('doubleTapOn: "window:title"')).toBe("Double tap the window title bar");

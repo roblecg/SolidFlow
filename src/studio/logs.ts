@@ -190,6 +190,30 @@ function switchWindowLabel(value: string): string {
   return `Switch to window "${trimmed.replace(/^"|"$/g, "")}"`;
 }
 
+function trayMenuLabel(raw: string): string {
+  const trimmed = raw.trim();
+  let item = trimmed;
+  let app = "";
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as { item?: unknown; app?: unknown };
+      if (typeof parsed.item === "string") item = parsed.item;
+      if (typeof parsed.app === "string") app = parsed.app.trim();
+    } catch {
+      item = trimmed;
+    }
+  } else if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      item = JSON.parse(trimmed) as string;
+    } catch {
+      item = trimmed.slice(1, -1);
+    }
+  }
+  item = item.trim();
+  if (app && item) return `Open "${item}" from ${app} on the taskbar`;
+  return item ? `Open "${item}" from the taskbar` : "Open the taskbar menu";
+}
+
 function windowControlLabel(value: string): string | null {
   const labels: Record<string, string> = {
     "window:close": "Close",
@@ -209,6 +233,9 @@ export function formatStepLabel(command: string): string {
   if (command === "switchToMain") return "Switch to the original window";
   if (command === "switchToWindow" || command.startsWith("switchToWindow")) {
     return switchWindowLabel(command.slice("switchToWindow".length).replace(/^:\s*/, ""));
+  }
+  if (command === "trayMenu" || command.startsWith("trayMenu")) {
+    return trayMenuLabel(command.slice("trayMenu".length).replace(/^:\s*/, ""));
   }
   const match = /^(\w+):\s*([\s\S]*)$/.exec(command);
   if (!match) return command;

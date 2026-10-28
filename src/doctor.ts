@@ -115,7 +115,7 @@ export async function runDoctor(flowPath?: string): Promise<DoctorResult> {
 async function kcpsServiceMessage(): Promise<string> {
   try {
     const res = await fetch("http://127.0.0.1:5570/api/app/info", { signal: AbortSignal.timeout(1500) });
-    if (res.ok || res.status > 0) {
+    if (res.ok) {
       return "OK StatusMonitorSvc is listening on 127.0.0.1:5570";
     }
   } catch {

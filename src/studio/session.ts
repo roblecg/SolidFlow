@@ -15,6 +15,9 @@ import {
   hitNode,
   imageToPage,
   listNativePopups,
+  listNamedTrayMenu,
+  listTrayApps as readTrayApps,
+  listTrayMenuItems,
   pagePixelHint,
   popupMatchingTitle,
   presentFrame,
@@ -312,6 +315,113 @@ export async function listSwitchWindows(): Promise<{
   } finally {
     if (listedDriver === current) listedTask = null;
   }
+}
+
+const TRAY_LIST_MS = 8000;
+const TRAY_MISS_MS = 1000;
+let trayDriver: AutomationDriver | null = null;
+let trayAt = 0;
+let trayCached: { items: string[]; message?: string } | null = null;
+let trayTask: Promise<{ items: string[]; message?: string }> | null = null;
+let appAt = 0;
+let appCached: { apps: string[]; message?: string } | null = null;
+let appTask: Promise<{ apps: string[]; message?: string }> | null = null;
+let namedKey = "";
+let namedAt = 0;
+let namedCached: { items: string[]; message?: string } | null = null;
+let namedTask: { key: string; task: Promise<{ items: string[]; message?: string }> } | null = null;
+
+export async function listTrayApps(): Promise<{
+  connected: boolean;
+  apps: string[];
+  message?: string;
+}> {
+  if (process.platform !== "win32") {
+    return { connected: true, apps: [], message: "The taskbar menu is available on Windows." };
+  }
+  const cacheMs = appCached && appCached.apps.length > 0 ? TRAY_LIST_MS : TRAY_MISS_MS;
+  if (appCached && Date.now() - appAt < cacheMs) return { connected: true, ...appCached };
+  if (!appTask) {
+    appCached = null;
+    appTask = readTrayApps().then(
+      apps => ({ apps }),
+      err => ({ apps: [] as string[], message: err instanceof Error ? err.message : "Could not read the taskbar." })
+    );
+  }
+  try {
+    const result = await appTask;
+    appCached = result;
+    appAt = Date.now();
+    return { connected: true, ...result };
+  } finally {
+    appTask = null;
+  }
+}
+
+export async function listTrayMenu(appName = ""): Promise<{
+  connected: boolean;
+  items: string[];
+  message?: string;
+}> {
+  const named = appName.trim();
+  if (named) return listNamedMenu(named);
+  if (!driver) return { connected: false, items: [] };
+  const current = driver;
+  const native = current.nativeApp();
+  if (!native || process.platform !== "win32") {
+    return { connected: true, items: [], message: "The taskbar menu belongs to the connected Windows app." };
+  }
+  const trayCacheMs = trayCached && trayCached.items.length > 0 ? TRAY_LIST_MS : TRAY_MISS_MS;
+  if (trayDriver === current && trayCached && Date.now() - trayAt < trayCacheMs) {
+    return { connected: true, ...trayCached };
+  }
+  let task = trayDriver === current ? trayTask : null;
+  if (!task) {
+    trayDriver = current;
+    trayCached = null;
+    task = listTrayMenuItems(native).then(
+      items => ({ items }),
+      err => ({ items: [], message: err instanceof Error ? err.message : "Could not read the taskbar menu." })
+    );
+    trayTask = task;
+  }
+  try {
+    const result = await task;
+    if (driver !== current) return { connected: false, items: [] };
+    trayCached = result;
+    trayAt = Date.now();
+    return { connected: true, ...result };
+  } finally {
+    if (trayDriver === current) trayTask = null;
+  }
+}
+
+async function listNamedMenu(appName: string): Promise<{
+  connected: boolean;
+  items: string[];
+  message?: string;
+}> {
+  const cacheMs = namedCached && namedKey === appName && namedCached.items.length > 0 ? TRAY_LIST_MS : TRAY_MISS_MS;
+  if (namedCached && namedKey === appName && Date.now() - namedAt < cacheMs) {
+    return { connected: true, ...namedCached };
+  }
+  let pending = namedTask;
+  if (!pending || pending.key !== appName) {
+    pending = {
+      key: appName,
+      task: listNamedTrayMenu(appName).then(
+        items => ({ items }),
+        err => ({ items: [] as string[], message: err instanceof Error ? err.message : "Could not read the taskbar menu." })
+      )
+    };
+    namedTask = pending;
+  }
+  const result = await pending.task;
+  if (namedTask === pending) namedTask = null;
+  namedKey = appName;
+  namedCached = result;
+  namedAt = Date.now();
+  return { connected: true, ...result };
 }
 
 export async function snapshot(): Promise<StudioSnapshot> {

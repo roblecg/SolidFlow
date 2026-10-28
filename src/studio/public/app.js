@@ -1170,47 +1170,77 @@ function scheduleWindowSuggest() {
   }, 80);
 }
 
+function suggestContext() {
+  return window.SolidFlowWindows.editorSuggestContext(editor.value, editor.selectionStart ?? 0);
+}
+
 async function refreshWindowSuggest() {
-  const caret = editor.selectionStart ?? 0;
-  const context = window.SolidFlowWindows.switchFileContext(editor.value, caret);
+  const context = suggestContext();
   if (!context || document.activeElement !== editor) {
     hideWindowSuggest();
     return;
   }
   const token = ++windowSuggestToken;
-  let payload = { connected: false, windows: [] };
+  if (context.kind === "tray-app") renderWindowSuggest([], true, context, "Reading the taskbar…");
+  if (context.kind === "tray-item") renderWindowSuggest([], true, context, "Reading the taskbar menu…");
+  const trayUrl = context.kind === "tray-app"
+    ? "/api/tray"
+    : context.kind === "tray-item"
+      ? "/api/tray?app=" + encodeURIComponent(context.app || "")
+      : "/api/windows";
+  let payload = { connected: false, windows: [], apps: [], items: [], message: "" };
   try {
-    const response = await fetch("/api/windows");
+    const response = await fetch(trayUrl);
     payload = await response.json();
   } catch {
-    payload = { connected: false, windows: [] };
+    payload = { connected: false, windows: [], apps: [], items: [], message: "" };
   }
   if (token !== windowSuggestToken) return;
-  const still = window.SolidFlowWindows.switchFileContext(editor.value, editor.selectionStart ?? 0);
-  if (!still || document.activeElement !== editor) {
+  const still = suggestContext();
+  if (!still || still.kind !== context.kind || document.activeElement !== editor) {
     hideWindowSuggest();
     return;
   }
+  if (still.kind === "tray-item" && still.app !== context.app) {
+    hideWindowSuggest();
+    return;
+  }
+  const windows = still.kind === "tray-app"
+    ? (payload.apps || []).map(item => ({ file: String(item), label: "" }))
+    : still.kind === "tray-item"
+      ? (payload.items || []).map(item => ({ file: String(item), label: "" }))
+      : (payload.windows || []);
   const query = still.typed.toLowerCase();
-  const windows = (payload.windows || []).filter(item => {
+  const matches = windows.filter(item => {
     if (!query) return true;
     const file = String(item.file || "").toLowerCase();
     const label = String(item.label || "").toLowerCase();
     return file.includes(query) || label.includes(query);
   });
-  renderWindowSuggest(windows, Boolean(payload.connected), still);
+  renderWindowSuggest(matches, Boolean(payload.connected), still, payload.message || "");
 }
 
-function renderWindowSuggest(windows, connected, context) {
+function suggestHint(context, connected, message) {
+  if (message) return message;
+  if (context.kind === "tray-app") return context.typed ? "No app matches." : "No apps are on the taskbar.";
+  if (context.kind === "tray-item") {
+    if (!connected && !context.app) return "Connect the app, or choose an app on the taskbar.";
+    return context.typed ? "No menu item matches." : "The taskbar menu has no items.";
+  }
+  if (!connected) return "Connect the app to list its windows.";
+  return context.typed ? "No open window matches." : "No windows are open in the connected app.";
+}
+
+function renderWindowSuggest(windows, connected, context, message) {
   windowSuggest.replaceChildren();
   windowSuggestItems = windows;
   windowSuggestIndex = 0;
+  const suggestLabel = context.kind === "tray-app" ? "Taskbar apps" : context.kind === "tray-item" ? "Taskbar menu" : "Open windows";
+  windowSuggest.setAttribute("aria-label", suggestLabel);
   if (!windows.length) {
     const note = document.createElement("div");
     note.className = "hint";
-    note.textContent = connected
-      ? (context.typed ? "No open window matches." : "No windows are open in the connected app.")
-      : "Connect the app to list its windows.";
+    note.textContent = suggestHint(context, connected, message);
     windowSuggest.append(note);
   } else {
     windows.forEach((item, index) => {
@@ -1260,9 +1290,24 @@ function setWindowSuggestIndex(index) {
 }
 
 function applyWindowFile(file) {
-  const context = window.SolidFlowWindows.switchFileContext(editor.value, editor.selectionStart ?? 0);
+  const context = suggestContext();
   if (!context) return;
   pushHistory("insert");
+  if (context.kind === "tray-app" && context.mode === "shorthand") {
+    const quoted = window.SolidFlowWindows.yamlFileValue(file).trim();
+    const pad = " ".repeat(context.indent || 4);
+    const block = "\n" + pad + "app: " + quoted + "\n" + pad + "item:";
+    editor.value = editor.value.slice(0, context.from) + block + editor.value.slice(context.to);
+    const caret = context.from + block.length;
+    editor.focus({ preventScroll: true });
+    editor.setSelectionRange(caret, caret);
+    revealEditorCaret(caret);
+    noteCommitted();
+    updateDirty();
+    hideWindowSuggest();
+    scheduleWindowSuggest();
+    return;
+  }
   const insert = window.SolidFlowWindows.yamlFileValue(file);
   editor.value = editor.value.slice(0, context.from) + insert + editor.value.slice(context.to);
   const caret = context.from + insert.length;

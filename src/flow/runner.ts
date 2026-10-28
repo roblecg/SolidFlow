@@ -41,6 +41,8 @@ import {
   nativeTextVisible,
   pagePixelHint,
   parseWindowControl,
+  openNamedTrayMenu,
+  openTrayMenu,
   performCaptionAction,
   setNativeText,
   type CaptionAction,
@@ -343,6 +345,16 @@ function announceOnPage(driver: AutomationDriver): boolean {
   return !driver.nativeApp()?.hwnd || driver.webWindowFocused();
 }
 
+function trayTarget(parsed: ReturnType<typeof parseStep>, env: Record<string, string>): { app: string; item: string } {
+  const text = (value: unknown) =>
+    interpolateEnv(typeof value === "string" || typeof value === "number" ? String(value) : "", env).trim();
+  if (parsed.kind === "kv") return { app: "", item: text(parsed.value) };
+  if (parsed.kind === "complex" && isRecord(parsed.value)) {
+    return { app: text(parsed.value.app), item: text(parsed.value.item) };
+  }
+  return { app: "", item: "" };
+}
+
 function windowQuery(parsed: ReturnType<typeof parseStep>, env: Record<string, string>): WindowQuery {
   if (parsed.kind === "simple") {
     throw new FlowError("switchToWindow needs a file name, a window title, or the heading in that window.");
@@ -437,6 +449,21 @@ async function executeStepBody(
       await driver.waitForPopup(popupTimeout(parsed.kind === "simple" ? undefined : parsed.value));
     }
     if (announceOnPage(driver)) await focusAndAnnounce(driver, name, ctx.paceMs);
+    return;
+  }
+
+  if (name === "trayMenu") {
+    const target = trayTarget(parsed, state.env);
+    if (!target.item) throw new FlowError("trayMenu needs the menu item, such as Proxy settings.");
+    if (target.app) {
+      await openNamedTrayMenu(target.app, target.item);
+      return;
+    }
+    if (!state.driver) await ensureDriver(state, flow, ctx);
+    const driver = state.driver!;
+    const native = driver.nativeApp();
+    if (!native) throw new FlowError("The taskbar menu belongs to the connected Windows app.");
+    await openTrayMenu(native, target.item);
     return;
   }
 

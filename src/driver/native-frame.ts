@@ -271,6 +271,53 @@ function finiteBounds(value: { x?: number; y?: number; width?: number; height?: 
   return { x, y, width, height, ...(Number.isFinite(dpi) && dpi > 0 ? { dpi } : {}) };
 }
 
+export async function listTrayApps(): Promise<string[]> {
+  return trayNames({ op: "trayApps" }, "Could not read the taskbar.");
+}
+
+export async function listTrayMenuItems(app: NativeApp): Promise<string[]> {
+  return trayNames({ op: "trayList", procId: app.pid, appPath: app.appPath }, "Could not read the taskbar menu.");
+}
+
+export async function listNamedTrayMenu(iconName: string): Promise<string[]> {
+  return trayNames({ op: "trayList", procId: 0, appPath: "", text: iconName }, "Could not read the taskbar menu.");
+}
+
+async function trayNames(body: Record<string, unknown>, fallback: string): Promise<string[]> {
+  if (process.platform !== "win32") {
+    throw new FlowError("The taskbar menu is available on Windows.");
+  }
+  let response: HelperResponse | null = null;
+  try {
+    response = await helperRequest(body, 12_000);
+  } catch (err) {
+    throw new FlowError(err instanceof Error ? err.message : fallback);
+  }
+  if (!response?.ok) throw new FlowError(response?.error || fallback);
+  return (response.items ?? []).filter(item => item.trim()).map(item => item.trim());
+}
+
+export async function openTrayMenu(app: NativeApp, item: string): Promise<void> {
+  await sendTray({ op: "tray", procId: app.pid, appPath: app.appPath, name: item });
+}
+
+export async function openNamedTrayMenu(iconName: string, item: string): Promise<void> {
+  await sendTray({ op: "tray", procId: 0, appPath: "", name: item, text: iconName });
+}
+
+async function sendTray(body: Record<string, unknown>): Promise<void> {
+  if (process.platform !== "win32") {
+    throw new FlowError("The taskbar menu is available on Windows.");
+  }
+  let response: HelperResponse | null = null;
+  try {
+    response = await helperRequest(body, 12_000);
+  } catch (err) {
+    throw new FlowError(err instanceof Error ? err.message : "Could not use the taskbar menu.");
+  }
+  if (!response?.ok) throw new FlowError(response?.error || "Could not use the taskbar menu.");
+}
+
 export async function invokeNativeControl(app: NativeApp, name: string, timeoutMs = 0): Promise<void> {
   await waitForNativeUi(() => nativeUi(app, "invoke", name), `${name} is not in the window.`, timeoutMs);
 }
@@ -421,6 +468,7 @@ type HelperResponse = {
   popup?: boolean;
   visible?: boolean;
   text?: string;
+  items?: string[];
   windows?: {
     hwnd?: string;
     title?: string;

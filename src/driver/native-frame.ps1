@@ -54,6 +54,8 @@ namespace SolidFlow {
 
     const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    const uint MOUSEEVENTF_RIGHTUP = 0x0010;
     const uint INPUT_KEYBOARD = 1;
     const uint KEYEVENTF_KEYUP = 0x0002;
     const uint KEYEVENTF_UNICODE = 0x0004;
@@ -125,6 +127,12 @@ namespace SolidFlow {
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] static extern int GetMenuItemCount(IntPtr hMenu);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetMenuString(IntPtr hMenu, uint item, StringBuilder text, int cch, uint flags);
+    [DllImport("user32.dll")] static extern bool GetMenuItemRect(IntPtr hWnd, IntPtr hMenu, uint item, out RECT rect);
+    const uint WM_CANCELMODE = 0x001F;
+    const uint MN_GETHMENU = 0x01E1;
     [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint count, INPUT[] inputs, int size);
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int nIndex);
@@ -153,6 +161,9 @@ namespace SolidFlow {
       appPath = appPath ?? "";
       if (op == "windows") return ListPopups(procId, appPath);
       if (op == "reveal") return Reveal(procId, appPath, hintW, hintH, cssW, cssH);
+      if (op == "tray") return OpenTrayItem(procId, appPath, name ?? "", text ?? "");
+      if (op == "trayList") return ListTrayItems(procId, appPath, text ?? "");
+      if (op == "trayApps") return ListTrayApps();
       IntPtr requested = ParseHwnd(hwndText);
       bool specific = requested != IntPtr.Zero;
       if (specific && (op == "invoke" || op == "visible" || op == "value" || op == "read" || op == "caption")) {
@@ -1063,6 +1074,603 @@ namespace SolidFlow {
         if (value > 0) return value;
       } catch { }
       return Math.Max(0, GetSystemMetrics(index));
+    }
+
+    static string ListTrayApps() {
+      bool openedOverflow = false;
+      try {
+        List<string> items = new List<string>();
+        CollectAppNames(items);
+        if (!OverflowOpen() && OpenHiddenIcons()) {
+          openedOverflow = true;
+          CollectAppNames(items);
+        }
+        if (items.Count == 0) return "{\"ok\":false,\"error\":\"The taskbar has no apps.\"}";
+        return ItemsJson(items);
+      } catch (Exception ex) {
+        return "{\"ok\":false,\"error\":" + JsonString(ex.Message) + "}";
+      } finally {
+        if (openedOverflow) CloseHiddenIcons();
+      }
+    }
+
+    static string ListTrayItems(int procId, string appPath, string iconName) {
+      bool openedOverflow = false;
+      iconName = (iconName ?? "").Trim();
+      try {
+        AutomationElement icon;
+        if (iconName.Length > 0) {
+          menuOwnerPid = ProcessForIcon(iconName);
+          icon = NamedTrayApp(iconName, out openedOverflow);
+          if (icon == null) return "{\"ok\":false,\"error\":" + JsonString("The taskbar has no app \"" + iconName + "\".") + "}";
+        } else {
+          menuOwnerPid = 0;
+          icon = TrayIcon(procId, appPath, out openedOverflow);
+          if (icon == null) return "{\"ok\":false,\"error\":\"The app icon is not on the taskbar.\"}";
+        }
+        List<string> items = CollectMenuItems(procId, appPath);
+        if (items.Count == 0) {
+          if (!ClickElement(icon, true)) return "{\"ok\":false,\"error\":\"Could not open the taskbar menu.\"}";
+          int started = Environment.TickCount;
+          while (unchecked(Environment.TickCount - started) < 2500) {
+            items = CollectMenuItems(procId, appPath);
+            if (items.Count > 0) break;
+            System.Threading.Thread.Sleep(80);
+          }
+        }
+        CloseTrayMenu(procId, appPath);
+        if (items.Count == 0) return "{\"ok\":false,\"error\":\"The taskbar menu has no items.\"}";
+        return ItemsJson(items);
+      } catch (Exception ex) {
+        return "{\"ok\":false,\"error\":" + JsonString(ex.Message) + "}";
+      } finally {
+        menuOwnerPid = 0;
+        if (openedOverflow) CloseHiddenIcons();
+      }
+    }
+
+    static string ItemsJson(List<string> items) {
+      StringBuilder json = new StringBuilder();
+      json.Append("{\"ok\":true,\"items\":[");
+      for (int i = 0; i < items.Count; i++) {
+        if (i > 0) json.Append(',');
+        json.Append(JsonString(items[i]));
+      }
+      json.Append("]}");
+      return json.ToString();
+    }
+
+    static AutomationElement TrayIcon(int procId, string appPath, out bool openedOverflow) {
+      openedOverflow = false;
+      IntPtr main = Find(procId, appPath, 0, 0, 0, 0);
+      string title = main == IntPtr.Zero ? "" : WindowTitle(main);
+      if (title.Length == 0) return null;
+      AutomationElement icon = FindTrayIcon(title);
+      if (icon != null) return icon;
+      if (!OpenHiddenIcons()) return null;
+      openedOverflow = true;
+      return FindTrayIcon(title);
+    }
+
+    static int menuOwnerPid;
+
+    static bool IsTrayMenuWindow(IntPtr hWnd, IntPtr main, int procId, string appPath) {
+      if (hWnd == IntPtr.Zero || hWnd == main || !IsWindowVisible(hWnd)) return false;
+      string cls = ClassNameOf(hWnd);
+      if (cls == "#32768") return true;
+      if (cls == "tooltips_class32" || cls == "SysShadow" || cls == "IME" || cls == "MSCTFIME UI") return false;
+      if (GetWindowTextLength(hWnd) != 0) return false;
+      RECT win;
+      if (!GetWindowRect(hWnd, out win)) return false;
+      int width = win.Right - win.Left;
+      int height = win.Bottom - win.Top;
+      if (width < 40 || height < 20 || width > 900 || height > 900) return false;
+      if (menuOwnerPid > 0) return WindowPid(hWnd) == menuOwnerPid;
+      return Related(hWnd, procId, appPath);
+    }
+
+    static int WindowPid(IntPtr hWnd) {
+      uint pid;
+      GetWindowThreadProcessId(hWnd, out pid);
+      return (int)pid;
+    }
+
+    static bool MenuBelongs(IntPtr hWnd, int procId, string appPath) {
+      if (menuOwnerPid > 0) return WindowPid(hWnd) == menuOwnerPid;
+      return Related(hWnd, procId, appPath);
+    }
+
+    static List<string> CollectMenuItems(int procId, string appPath) {
+      IntPtr main = Find(procId, appPath, 0, 0, 0, 0);
+      List<string> best = new List<string>();
+      int bestScore = 0;
+      held = delegate(IntPtr hWnd, IntPtr lParam) {
+        try {
+          if (!IsTrayMenuWindow(hWnd, main, procId, appPath)) return true;
+          List<string> found = new List<string>();
+          ReadTrayMenuWindow(hWnd, found);
+          if (found.Count == 0) return true;
+          int score = found.Count + (MenuBelongs(hWnd, procId, appPath) ? 100 : 0);
+          if (score <= bestScore) return true;
+          bestScore = score;
+          best = found;
+        } catch { }
+        return true;
+      };
+      try { EnumWindows(held, IntPtr.Zero); }
+      finally { held = null; }
+      return best;
+    }
+
+    static void ReadTrayMenuWindow(IntPtr hWnd, List<string> items) {
+      if (ClassNameOf(hWnd) == "#32768") {
+        AddNativeMenuStrings(hWnd, items);
+        if (items.Count > 0) return;
+      }
+      AddUiaMenuItems(hWnd, items);
+    }
+
+    static void AddNativeMenuStrings(IntPtr hWnd, List<string> items) {
+      IntPtr menu = SendMessagePtr(hWnd, MN_GETHMENU, IntPtr.Zero, IntPtr.Zero);
+      int count = menu == IntPtr.Zero ? 0 : GetMenuItemCount(menu);
+      StringBuilder buffer = new StringBuilder(512);
+      for (uint i = 0; i < count; i++) {
+        buffer.Clear();
+        if (GetMenuString(menu, i, buffer, buffer.Capacity, 0x0400) == 0) continue;
+        string name = MenuLabel(buffer.ToString());
+        if (name.Length == 0 || items.Contains(name)) continue;
+        items.Add(name);
+      }
+    }
+
+    static bool HasMenuItem(IntPtr hWnd) {
+      try {
+        AutomationElement menu = AutomationElement.FromHandle(hWnd);
+        AutomationElement item = menu.FindFirst(
+          TreeScope.Descendants,
+          new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem));
+        return item != null;
+      } catch {
+        return false;
+      }
+    }
+
+    static void AddUiaMenuItems(IntPtr hWnd, List<string> items) {
+      AutomationElement menu = AutomationElement.FromHandle(hWnd);
+      AutomationElementCollection nodes = menu.FindAll(
+        TreeScope.Descendants,
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem));
+      foreach (AutomationElement el in nodes) {
+        string name = "";
+        try { name = MenuLabel(el.Current.Name ?? ""); } catch { continue; }
+        if (name.Length == 0 || items.Contains(name)) continue;
+        items.Add(name);
+      }
+    }
+
+    static string MenuLabel(string raw) {
+      if (string.IsNullOrEmpty(raw)) return "";
+      int tab = raw.IndexOf('\t');
+      if (tab >= 0) raw = raw.Substring(0, tab);
+      StringBuilder buffer = new StringBuilder(raw.Length);
+      for (int i = 0; i < raw.Length; i++) {
+        if (raw[i] != '&') {
+          buffer.Append(raw[i]);
+          continue;
+        }
+        if (i + 1 < raw.Length) buffer.Append(raw[++i]);
+      }
+      return buffer.ToString().Trim();
+    }
+
+    static void CloseTrayMenu(int procId, string appPath) {
+      IntPtr main = Find(procId, appPath, 0, 0, 0, 0);
+      held = delegate(IntPtr hWnd, IntPtr lParam) {
+        try {
+          if (!IsTrayMenuWindow(hWnd, main, procId, appPath)) return true;
+          if (ClassNameOf(hWnd) != "#32768" && !HasMenuItem(hWnd)) return true;
+          PostMessage(hWnd, WM_CANCELMODE, IntPtr.Zero, IntPtr.Zero);
+          if (ClassNameOf(hWnd) != "#32768") return true;
+          IntPtr owner = GetWindow(hWnd, GW_OWNER);
+          if (owner == IntPtr.Zero) owner = GetAncestor(hWnd, 2);
+          if (owner != IntPtr.Zero && owner != hWnd) PostMessage(owner, WM_CANCELMODE, IntPtr.Zero, IntPtr.Zero);
+        } catch { }
+        return true;
+      };
+      try { EnumWindows(held, IntPtr.Zero); }
+      finally { held = null; }
+    }
+
+    static void CloseHiddenIcons() {
+      if (!OverflowOpen()) return;
+      System.Threading.Thread.Sleep(200);
+      OpenHiddenIcons();
+    }
+
+    static bool OverflowOpen() {
+      bool open = false;
+      held = delegate(IntPtr hWnd, IntPtr lParam) {
+        try {
+          if (!IsWindowVisible(hWnd)) return true;
+          string cls = ClassNameOf(hWnd);
+          if (cls.IndexOf("Overflow", StringComparison.OrdinalIgnoreCase) >= 0) open = true;
+        } catch { }
+        return !open;
+      };
+      try { EnumWindows(held, IntPtr.Zero); }
+      finally { held = null; }
+      return open;
+    }
+
+    static string OpenTrayItem(int procId, string appPath, string item, string iconName) {
+      item = (item ?? "").Trim();
+      iconName = (iconName ?? "").Trim();
+      if (item.Length == 0) return "{\"ok\":false,\"error\":\"trayMenu needs the menu item, such as Proxy settings.\"}";
+      bool openedOverflow = false;
+      try {
+        AutomationElement icon;
+        if (iconName.Length > 0) {
+          menuOwnerPid = ProcessForIcon(iconName);
+          icon = NamedTrayApp(iconName, out openedOverflow);
+          if (icon == null) return "{\"ok\":false,\"error\":" + JsonString("The taskbar has no app \"" + iconName + "\".") + "}";
+        } else {
+          menuOwnerPid = 0;
+          IntPtr main = Find(procId, appPath, 0, 0, 0, 0);
+          string title = main == IntPtr.Zero ? "" : WindowTitle(main);
+          if (title.Length == 0) return "{\"ok\":false,\"error\":\"The app window has no title, so its taskbar icon cannot be chosen.\"}";
+          icon = TrayIcon(procId, appPath, out openedOverflow);
+          if (icon == null) return "{\"ok\":false,\"error\":\"The app icon is not on the taskbar.\"}";
+        }
+        if (ChooseTrayItem(item, procId, appPath)) return "{\"ok\":true}";
+        if (!ClickElement(icon, true)) return "{\"ok\":false,\"error\":\"Could not open the taskbar menu.\"}";
+        if (!WaitTrayItem(item, procId, appPath, 2500)) {
+          CloseTrayMenu(procId, appPath);
+          return "{\"ok\":false,\"error\":" + JsonString("The taskbar menu has no item \"" + item + "\".") + "}";
+        }
+        return "{\"ok\":true}";
+      } catch (Exception ex) {
+        return "{\"ok\":false,\"error\":" + JsonString(ex.Message) + "}";
+      } finally {
+        menuOwnerPid = 0;
+        if (openedOverflow) CloseHiddenIcons();
+      }
+    }
+
+    static bool ChooseTrayItem(string item, int procId, string appPath) {
+      AutomationElement menuItem = FindMenuItem(item, procId, appPath);
+      if (menuItem != null) return ClickElement(menuItem, false);
+      return ClickNativeMenuItem(item, procId, appPath);
+    }
+
+    static bool WaitTrayItem(string item, int procId, string appPath, int timeoutMs) {
+      int started = Environment.TickCount;
+      for (;;) {
+        if (ChooseTrayItem(item, procId, appPath)) return true;
+        if (unchecked(Environment.TickCount - started) >= timeoutMs) return false;
+        System.Threading.Thread.Sleep(80);
+      }
+    }
+
+    static bool IconMatches(string buttonName, string windowTitle) {
+      buttonName = (buttonName ?? "").Trim();
+      windowTitle = (windowTitle ?? "").Trim();
+      if (buttonName.Length < 2 || windowTitle.Length < 2) return false;
+      if (string.Equals(buttonName, windowTitle, StringComparison.OrdinalIgnoreCase)) return true;
+      if (!windowTitle.StartsWith(buttonName, StringComparison.OrdinalIgnoreCase)) return false;
+      if (windowTitle.Length == buttonName.Length) return true;
+      char next = windowTitle[buttonName.Length];
+      return next == ' ' || next == '-' || next == ':' || next == '|';
+    }
+
+    static List<AutomationElement> TrayRoots() {
+      List<AutomationElement> roots = new List<AutomationElement>();
+      AutomationElement tray = AutomationElement.RootElement.FindFirst(
+        TreeScope.Children,
+        new PropertyCondition(AutomationElement.ClassNameProperty, "Shell_TrayWnd"));
+      if (tray != null) roots.Add(tray);
+      held = delegate(IntPtr hWnd, IntPtr lParam) {
+        try {
+          if (!IsWindowVisible(hWnd)) return true;
+          string cls = ClassNameOf(hWnd);
+          if (cls == "NotifyIconOverflowWindow" || cls == "TopLevelWindowForOverflowXamlIsland" || cls.IndexOf("Overflow", StringComparison.OrdinalIgnoreCase) >= 0) {
+            roots.Add(AutomationElement.FromHandle(hWnd));
+          }
+        } catch { }
+        return true;
+      };
+      try { EnumWindows(held, IntPtr.Zero); }
+      finally { held = null; }
+      return roots;
+    }
+
+    static AutomationElement FindTrayIcon(string windowTitle) {
+      AutomationElement best = null;
+      int bestLen = 0;
+      foreach (AutomationElement root in TrayRoots()) {
+        AutomationElementCollection nodes;
+        try { nodes = root.FindAll(TreeScope.Descendants, Condition.TrueCondition); }
+        catch { continue; }
+        foreach (AutomationElement node in nodes) {
+          ControlType type;
+          string name;
+          try {
+            type = node.Current.ControlType;
+            name = node.Current.Name ?? "";
+          } catch { continue; }
+          if (type != ControlType.Button && type != ControlType.SplitButton) continue;
+          if (!IconMatches(name, windowTitle) || !OnScreen(node)) continue;
+          if (name.Trim().Length <= bestLen) continue;
+          best = node;
+          bestLen = name.Trim().Length;
+        }
+      }
+      return best;
+    }
+
+    static void CollectAppNames(List<string> items) {
+      foreach (AutomationElement root in TrayRoots()) {
+        bool overflow = IsOverflowRoot(root);
+        AutomationElementCollection nodes;
+        try { nodes = root.FindAll(TreeScope.Descendants, Condition.TrueCondition); }
+        catch { continue; }
+        foreach (AutomationElement node in nodes) {
+          if (!IsAppButton(node, overflow)) continue;
+          string name = "";
+          try { name = (node.Current.Name ?? "").Trim(); } catch { continue; }
+          if (name.Length < 2 || HasName(items, name)) continue;
+          items.Add(name);
+        }
+      }
+    }
+
+    static AutomationElement NamedTrayApp(string iconName, out bool openedOverflow) {
+      openedOverflow = false;
+      AutomationElement icon = FindNamedApp(iconName);
+      if (icon != null) return icon;
+      if (OverflowOpen() || !OpenHiddenIcons()) return null;
+      openedOverflow = true;
+      return FindNamedApp(iconName);
+    }
+
+    static AutomationElement FindNamedApp(string iconName) {
+      AutomationElement fallback = null;
+      foreach (AutomationElement root in TrayRoots()) {
+        bool overflow = IsOverflowRoot(root);
+        AutomationElementCollection nodes;
+        try { nodes = root.FindAll(TreeScope.Descendants, Condition.TrueCondition); }
+        catch { continue; }
+        foreach (AutomationElement node in nodes) {
+          if (!IsAppButton(node, overflow)) continue;
+          string name = "";
+          string cls = "";
+          try {
+            name = (node.Current.Name ?? "").Trim();
+            cls = node.Current.ClassName ?? "";
+          } catch { continue; }
+          if (!string.Equals(name, iconName, StringComparison.OrdinalIgnoreCase)) continue;
+          if (cls.IndexOf("SystemTray", StringComparison.OrdinalIgnoreCase) >= 0 || cls.IndexOf("NotifyIcon", StringComparison.OrdinalIgnoreCase) >= 0) return node;
+          if (fallback == null) fallback = node;
+        }
+      }
+      return fallback;
+    }
+
+    static int ProcessForIcon(string iconName) {
+      int best = 0;
+      int bestScore = 0;
+      held = delegate(IntPtr hWnd, IntPtr lParam) {
+        try {
+          if (!IsWindowVisible(hWnd)) return true;
+          string title = WindowTitle(hWnd);
+          if (!SameApp(iconName, title)) return true;
+          string image = ProcessPath((uint)WindowPid(hWnd));
+          if (IsStudioProcess(image)) return true;
+          int score = string.Equals(title, iconName, StringComparison.OrdinalIgnoreCase) ? 2 : 1;
+          if (score <= bestScore) return true;
+          bestScore = score;
+          best = WindowPid(hWnd);
+        } catch { }
+        return true;
+      };
+      try { EnumWindows(held, IntPtr.Zero); }
+      finally { held = null; }
+      return best;
+    }
+
+    static bool SameApp(string iconName, string windowTitle) {
+      return IconMatches(iconName, windowTitle) || IconMatches(windowTitle, iconName);
+    }
+
+    static bool HasName(List<string> items, string name) {
+      foreach (string item in items) {
+        if (string.Equals(item, name, StringComparison.OrdinalIgnoreCase)) return true;
+      }
+      return false;
+    }
+
+    static bool IsOverflowRoot(AutomationElement root) {
+      try {
+        string cls = root.Current.ClassName ?? "";
+        return cls.IndexOf("Overflow", StringComparison.OrdinalIgnoreCase) >= 0;
+      } catch { return false; }
+    }
+
+    static bool IsAppButton(AutomationElement node, bool inOverflow) {
+      ControlType type;
+      string name;
+      string cls;
+      string id;
+      try {
+        type = node.Current.ControlType;
+        name = (node.Current.Name ?? "").Trim();
+        cls = node.Current.ClassName ?? "";
+        id = node.Current.AutomationId ?? "";
+      } catch { return false; }
+      if (type != ControlType.Button && type != ControlType.SplitButton) return false;
+      if (name.Length < 2 || !OnScreen(node) || IsChevron(node) || IsShellChrome(id, name)) return false;
+      if (inOverflow) return true;
+      if (cls.IndexOf("SystemTray", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+      if (cls.IndexOf("NotifyIcon", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+      return false;
+    }
+
+    static bool IsShellChrome(string id, string name) {
+      string[] ids = {
+        "Chevron", "Clock", "Network", "Volume", "ActionCenter", "ShowDesktop", "StartButton",
+        "SearchButton", "TaskView", "Widgets", "MeetNow", "InkWorkspace", "TouchKeyboard", "InputIndicator"
+      };
+      foreach (string token in ids) {
+        if (id.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+      }
+      string lower = name.ToLowerInvariant();
+      if (lower == "show desktop" || lower == "start" || lower == "search" || lower == "task view"
+        || lower == "widgets" || lower == "news and interests" || lower == "notification center"
+        || lower == "action center") return true;
+      string[] prefixes = {
+        "clock ", "network ", "volume ", "power ", "battery ", "tray input indicator",
+        "input indicator", "safely remove hardware", "show hidden icons"
+      };
+      foreach (string prefix in prefixes) {
+        if (lower.StartsWith(prefix, StringComparison.Ordinal)) return true;
+      }
+      return false;
+    }
+
+    static bool OnScreen(AutomationElement el) {
+      try {
+        if (el.Current.IsOffscreen) return false;
+        System.Windows.Rect rect = el.Current.BoundingRectangle;
+        return !rect.IsEmpty && rect.Width >= 2 && rect.Height >= 2 && rect.X > -32000 && rect.Y > -32000;
+      } catch { return false; }
+    }
+
+    static bool IsChevron(AutomationElement el) {
+      string name = "";
+      string id = "";
+      try { name = el.Current.Name ?? ""; } catch { }
+      try { id = el.Current.AutomationId ?? ""; } catch { }
+      if (id.IndexOf("Chevron", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+      if (name.IndexOf("hidden icon", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+      if (name.IndexOf("非表示のアイコン", StringComparison.Ordinal) >= 0) return true;
+      return false;
+    }
+
+    static bool OpenHiddenIcons() {
+      AutomationElement tray = AutomationElement.RootElement.FindFirst(
+        TreeScope.Children,
+        new PropertyCondition(AutomationElement.ClassNameProperty, "Shell_TrayWnd"));
+      if (tray == null) return false;
+      AutomationElementCollection nodes;
+      try { nodes = tray.FindAll(TreeScope.Descendants, Condition.TrueCondition); }
+      catch { return false; }
+      foreach (AutomationElement node in nodes) {
+        ControlType type;
+        try { type = node.Current.ControlType; } catch { continue; }
+        if (type != ControlType.Button && type != ControlType.SplitButton) continue;
+        if (!IsChevron(node) || !OnScreen(node)) continue;
+        if (!ClickElement(node, false)) return false;
+        System.Threading.Thread.Sleep(450);
+        return true;
+      }
+      return false;
+    }
+
+    static AutomationElement FindMenuItem(string item, int procId, string appPath) {
+      IntPtr main = Find(procId, appPath, 0, 0, 0, 0);
+      AutomationElement found = null;
+      bool foundRelated = false;
+      held = delegate(IntPtr hWnd, IntPtr lParam) {
+        try {
+          if (!IsTrayMenuWindow(hWnd, main, procId, appPath)) return true;
+          bool related = MenuBelongs(hWnd, procId, appPath);
+          if (found != null && (foundRelated || !related)) return true;
+          AutomationElement match = MenuItemNamed(hWnd, item);
+          if (match == null) return true;
+          found = match;
+          foundRelated = related;
+          return !related;
+        } catch { }
+        return true;
+      };
+      try { EnumWindows(held, IntPtr.Zero); }
+      finally { held = null; }
+      return found;
+    }
+
+    static AutomationElement MenuItemNamed(IntPtr hWnd, string item) {
+      AutomationElement menu = AutomationElement.FromHandle(hWnd);
+      AutomationElementCollection items = menu.FindAll(
+        TreeScope.Descendants,
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem));
+      foreach (AutomationElement el in items) {
+        string name = "";
+        try { name = MenuLabel(el.Current.Name ?? ""); } catch { continue; }
+        if (!string.Equals(name, item, StringComparison.OrdinalIgnoreCase)) continue;
+        return el;
+      }
+      return null;
+    }
+
+    static bool ClickNativeMenuItem(string item, int procId, string appPath) {
+      IntPtr main = Find(procId, appPath, 0, 0, 0, 0);
+      bool clicked = false;
+      held = delegate(IntPtr hWnd, IntPtr lParam) {
+        try {
+          if (clicked || !IsTrayMenuWindow(hWnd, main, procId, appPath) || ClassNameOf(hWnd) != "#32768") return true;
+          IntPtr menu = SendMessagePtr(hWnd, MN_GETHMENU, IntPtr.Zero, IntPtr.Zero);
+          int count = menu == IntPtr.Zero ? 0 : GetMenuItemCount(menu);
+          StringBuilder buffer = new StringBuilder(512);
+          for (uint i = 0; i < count; i++) {
+            buffer.Clear();
+            if (GetMenuString(menu, i, buffer, buffer.Capacity, 0x0400) == 0) continue;
+            if (!string.Equals(MenuLabel(buffer.ToString()), item, StringComparison.OrdinalIgnoreCase)) continue;
+            RECT rect;
+            if (!GetMenuItemRect(hWnd, menu, i, out rect) && !GetMenuItemRect(IntPtr.Zero, menu, i, out rect)) {
+              RECT win;
+              if (!GetWindowRect(hWnd, out win) || count == 0) return true;
+              int height = Math.Max(1, (win.Bottom - win.Top) / count);
+              rect.Left = win.Left;
+              rect.Right = win.Right;
+              rect.Top = win.Top + (int)i * height;
+              rect.Bottom = rect.Top + height;
+            }
+            int x = (rect.Left + rect.Right) / 2;
+            int y = (rect.Top + rect.Bottom) / 2;
+            clicked = ClickPoint(x, y, false);
+            return false;
+          }
+        } catch { }
+        return true;
+      };
+      try { EnumWindows(held, IntPtr.Zero); }
+      finally { held = null; }
+      return clicked;
+    }
+
+    static bool ClickPoint(int x, int y, bool right) {
+      if (!SetCursorPos(x, y)) return false;
+      uint down = right ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
+      uint up = right ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
+      mouse_event(down, 0, 0, 0, UIntPtr.Zero);
+      mouse_event(up, 0, 0, 0, UIntPtr.Zero);
+      return true;
+    }
+
+    static bool ClickElement(AutomationElement el, bool right) {
+      System.Windows.Rect rect;
+      try {
+        if (el.Current.IsOffscreen) return false;
+        rect = el.Current.BoundingRectangle;
+      } catch { return false; }
+      if (rect.IsEmpty || rect.Width < 2 || rect.Height < 2) return false;
+      int x = (int)Math.Round(rect.X + rect.Width / 2.0);
+      int y = (int)Math.Round(rect.Y + rect.Height / 2.0);
+      if (!SetCursorPos(x, y)) return false;
+      uint down = right ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
+      uint up = right ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
+      mouse_event(down, 0, 0, 0, UIntPtr.Zero);
+      mouse_event(up, 0, 0, 0, UIntPtr.Zero);
+      return true;
     }
 
     static IntPtr Find(int procId, string appPath, int hintW, int hintH, int cssW, int cssH) {

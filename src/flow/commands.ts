@@ -104,6 +104,7 @@ const SPECS: Spec[] = [
   { name: "waitForPopup", category: "SolidFlow", summary: "Wait for the next window from the connected app, including a folder picker, then continue there. A separate system browser is not followed. Optional timeout is milliseconds.", available: true, usesSelector: false, insert: { type: "template", body: "- waitForPopup:\n    timeout: 10000" } },
   { name: "switchToMain", category: "SolidFlow", summary: "Return to the original app window.", available: true, usesSelector: false, insert: { type: "bare" } },
   { name: "switchToWindow", category: "SolidFlow", summary: "Switch to a window that is already open, or wait until it is visible. After file:, Studio lists the windows the connected app has open. title is the window caption. text is a heading in that window, such as Update available. switchToMain still returns to the original window.", available: true, usesSelector: false, insert: { type: "template", body: "- switchToWindow:\n    file:" } },
+  { name: "trayMenu", category: "SolidFlow", summary: "Open a menu item from an app on the taskbar. After trayMenu:, Studio lists the apps on the taskbar. Choose one, then choose that app's menu item. A value with no app uses the connected app.", available: true, usesSelector: false, insert: { type: "template", body: "- trayMenu:" } },
   {
     name: "section",
     category: "SolidFlow",

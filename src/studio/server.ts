@@ -50,6 +50,8 @@ import {
   snapshot,
   SessionCancelledError,
   listSwitchWindows,
+  listTrayApps,
+  listTrayMenu,
   startSession,
   stopSession,
   whenSessionIdle
@@ -429,6 +431,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
   if (req.method === "GET" && url.pathname === "/api/windows") {
     sendJson(res, 200, await listSwitchWindows());
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/tray") {
+    if (url.searchParams.has("app")) sendJson(res, 200, await listTrayMenu(url.searchParams.get("app") ?? ""));
+    else sendJson(res, 200, await listTrayApps());
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/session") {
