@@ -42,9 +42,27 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
   }
 
   async disconnect(): Promise<void> {
-    if (this.browser) {
-      await this.browser.close().catch(() => {});
-    }
+    const browser = this.browser;
+    this.clearAttachedBrowser();
+    if (browser) await browser.close().catch(() => {});
+  }
+
+  /**
+   * Forget this app's browser after its process is gone.
+   * browser.close() only. Closing browser._connection shuts Playwright down for the whole
+   * Studio process, and the next connect fails with "solidFlow disconnect".
+   */
+  protected async releaseBrowser(): Promise<void> {
+    const browser = this.browser;
+    this.clearAttachedBrowser();
+    if (!browser) return;
+    await Promise.race([
+      browser.close().catch(() => {}),
+      new Promise(resolve => setTimeout(resolve, 2_000))
+    ]);
+  }
+
+  private clearAttachedBrowser(): void {
     this.browser = null;
     this.page = null;
     this.mainPage = null;

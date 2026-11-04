@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DriverKind, DeviceInfo } from "../types.js";
 import type { DriverContext } from "./types.js";
+import { stopNativeFrameHost } from "./native-frame.js";
 import { PlaywrightBaseDriver } from "./playwright-base.js";
+import { stopLaunchedApp } from "./stop-app.js";
 import { getFreePort } from "../util/port.js";
 import { kcpsInstallerHint } from "./electron-app.js";
 
@@ -51,11 +53,21 @@ export class WebView2Driver extends PlaywrightBaseDriver {
   }
 
   async disconnect(): Promise<void> {
-    await super.disconnect();
-    if (this.child && !this.child.killed) {
-      this.child.kill();
-      this.child = null;
+    const child = this.child;
+    this.child = null;
+    await stopLaunchedApp({
+      pid: child?.pid,
+      appPath: this.ctx?.appPath,
+      userDataDir: this.userDataDir,
+      debugPort: this.debugPort
+    });
+    try {
+      child?.kill();
+    } catch {
+      // already gone
     }
+    stopNativeFrameHost();
+    await this.releaseBrowser();
   }
 
   async clearState(): Promise<void> {

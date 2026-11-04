@@ -1,13 +1,13 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
 import type { Page } from "playwright-core";
 import type { DriverKind, DeviceInfo } from "../types.js";
 import type { DriverContext } from "./types.js";
 import { revealNativeWindow, stopNativeFrameHost } from "./native-frame.js";
 import { PlaywrightBaseDriver } from "./playwright-base.js";
+import { stopLaunchedApp } from "./stop-app.js";
 import { getFreePort } from "../util/port.js";
 import {
   electronAttachError,
@@ -18,8 +18,6 @@ import {
   isKcpsDesktop,
   preferKcpsPageUrl
 } from "./electron-app.js";
-
-const execFileAsync = promisify(execFile);
 
 type CdpTarget = { type?: string; url?: string };
 
@@ -80,13 +78,7 @@ export class ElectronDriver extends PlaywrightBaseDriver {
     this.stopped = true;
     await this.stopProcess();
     stopNativeFrameHost();
-    // Electron ignores Playwright's close while a window refuses to close, which leaves the CDP socket open.
-    const browser = this.browser as { _connection?: { close: (cause?: string) => void } } | null;
-    browser?._connection?.close("solidFlow disconnect");
-    await Promise.race([
-      super.disconnect().catch(() => {}),
-      new Promise(resolve => setTimeout(resolve, 1_000))
-    ]);
+    await this.releaseBrowser();
   }
 
   async clearState(): Promise<void> {
@@ -192,19 +184,21 @@ export class ElectronDriver extends PlaywrightBaseDriver {
     const child = this.child;
     this.child = null;
     const pid = child?.pid;
-    if (!child || !pid) return;
     const exited = new Promise<void>(resolve => {
-      if (child.exitCode !== null || child.signalCode !== null) {
+      if (!child || child.exitCode !== null || child.signalCode !== null) {
         resolve();
         return;
       }
       child.once("exit", () => resolve());
     });
-    if (process.platform === "win32") {
-      await execFileAsync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }).catch(() => {});
-    }
+    await stopLaunchedApp({
+      pid,
+      appPath: this.ctx?.appPath,
+      userDataDir: this.userDataDir,
+      debugPort: this.debugPort
+    });
     try {
-      child.kill();
+      child?.kill();
     } catch {
       // already gone
     }
