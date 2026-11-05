@@ -172,6 +172,7 @@ async function runFlowOnce(
       : normalizeFlowSections(flow.steps);
   const execSteps = normalized.steps;
   const flowSections = normalized.sections;
+  const usesBrowser = execSteps.some(step => commandName(step) === "switchToBrowser");
 
   try {
     for (let i = 0; i < execSteps.length; i++) {
@@ -197,6 +198,12 @@ async function runFlowOnce(
         const command = formatStep(step);
         options.onStep?.({ index: i, command, status: "running", sectionNumber });
         try {
+          if (usesBrowser && state.driver && commandName(step) !== "switchToBrowser") {
+            const nextIsSwitch = i + 1 < execSteps.length && commandName(execSteps[i + 1]!) === "switchToBrowser";
+            if (nextIsSwitch || !state.driver.hasBrowserBaseline()) {
+              await state.driver.noteSystemBrowser(nextIsSwitch);
+            }
+          }
           await executeStep(step, state, flow, {
             appPath,
             driverKind,
@@ -364,6 +371,20 @@ function windowQuery(parsed: ReturnType<typeof parseStep>, env: Record<string, s
   return { file: fill(query.file), title: fill(query.title), text: fill(query.text), any: query.any };
 }
 
+function browserTarget(
+  parsed: ReturnType<typeof parseStep>,
+  env: Record<string, string>
+): { url: string; timeout: number } {
+  const text = (value: unknown) =>
+    interpolateEnv(typeof value === "string" || typeof value === "number" ? String(value) : "", env).trim();
+  if (parsed.kind === "kv") return { url: text(parsed.value), timeout: 30_000 };
+  if (parsed.kind === "complex" && isRecord(parsed.value)) {
+    const specified = parsed.value.timeout != null && String(parsed.value.timeout).trim() !== "";
+    return { url: text(parsed.value.url), timeout: specified ? popupTimeout(parsed.value) : 30_000 };
+  }
+  return { url: "", timeout: 30_000 };
+}
+
 function popupTimeout(value: unknown): number {
   const raw =
     typeof value === "number"
@@ -438,13 +459,16 @@ async function executeStepBody(
     return;
   }
 
-  if (name === "waitForPopup" || name === "switchToMain" || name === "switchToWindow") {
+  if (name === "waitForPopup" || name === "switchToMain" || name === "switchToWindow" || name === "switchToBrowser") {
     if (!state.driver) await ensureDriver(state, flow, ctx);
     const driver = state.driver!;
     if (name === "switchToMain") await driver.switchToMain();
     else if (name === "switchToWindow") {
       const value = parsed.kind === "simple" ? undefined : parsed.value;
       await driver.switchToWindow(windowQuery(parsed, state.env), popupTimeout(value));
+    } else if (name === "switchToBrowser") {
+      const target = browserTarget(parsed, state.env);
+      await driver.switchToBrowser(target.url, target.timeout);
     } else {
       await driver.waitForPopup(popupTimeout(parsed.kind === "simple" ? undefined : parsed.value));
     }
@@ -939,6 +963,11 @@ async function ensureDriver(state: ExecState, flow: FlowDocument, ctx: StepCtx):
   });
   state.driver = driver;
   state.userDataDir = driver.profileDir?.() ?? state.userDataDir;
+}
+
+function commandName(step: FlowStep): string {
+  if (typeof step === "string") return step;
+  return Object.keys(step)[0] ?? "";
 }
 
 function formatStep(step: FlowStep): string {

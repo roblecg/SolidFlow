@@ -173,6 +173,25 @@ export function clearTestRuns(): void {
   testRuns.length = 0;
 }
 
+function switchBrowserLabel(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "null") return "Switch to the browser";
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed == null) return "Switch to the browser";
+    if (typeof parsed === "string" && parsed.trim()) return `Switch to the browser at ${parsed.trim()}`;
+    if (parsed && typeof parsed === "object") {
+      const url = (parsed as { url?: unknown }).url;
+      if (typeof url === "string" && url.trim()) return `Switch to the browser at ${url.trim()}`;
+      return "Switch to the browser";
+    }
+  } catch {
+    // The log line is already plain text.
+  }
+  const plain = trimmed.replace(/^"|"$/g, "").trim();
+  return plain ? `Switch to the browser at ${plain}` : "Switch to the browser";
+}
+
 function switchWindowLabel(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "Switch to window";
@@ -231,6 +250,9 @@ export function formatStepLabel(command: string): string {
   if (command === "clearState") return "Clear app state";
   if (command === "waitForPopup" || command.startsWith("waitForPopup")) return "Wait for the next window";
   if (command === "switchToMain") return "Switch to the original window";
+  if (command === "switchToBrowser" || command.startsWith("switchToBrowser")) {
+    return switchBrowserLabel(command.slice("switchToBrowser".length).replace(/^:\s*/, ""));
+  }
   if (command === "switchToWindow" || command.startsWith("switchToWindow")) {
     return switchWindowLabel(command.slice("switchToWindow".length).replace(/^:\s*/, ""));
   }

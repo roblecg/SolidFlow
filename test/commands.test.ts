@@ -39,6 +39,7 @@ describe("maestro command catalog", () => {
     expect(listCommands().some(command => command.name === "waitForPopup")).toBe(true);
     expect(listCommands().some(command => command.name === "switchToMain")).toBe(true);
     expect(listCommands().some(command => command.name === "switchToWindow")).toBe(true);
+    expect(listCommands().some(command => command.name === "switchToBrowser")).toBe(true);
     expect(listCommands().some(command => command.name === "trayMenu")).toBe(true);
   });
 

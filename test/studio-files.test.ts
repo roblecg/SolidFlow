@@ -50,6 +50,11 @@ describe("studio files", () => {
       'Switch to window "ProxySettings.html"'
     );
     expect(formatStepLabel('switchToWindow: "Update available"')).toBe('Switch to window "Update available"');
+    expect(formatStepLabel('switchToBrowser: {"url":"login.microsoftonline.com"}')).toBe(
+      "Switch to the browser at login.microsoftonline.com"
+    );
+    expect(formatStepLabel("switchToBrowser: null")).toBe("Switch to the browser");
+    expect(formatStepLabel("switchToBrowser: {}")).toBe("Switch to the browser");
     expect(formatStepLabel('trayMenu: "Proxy settings"')).toBe('Open "Proxy settings" from the taskbar');
     expect(formatStepLabel('trayMenu: {"app":"Cursor","item":"Settings"}')).toBe(
       'Open "Settings" from Cursor on the taskbar'

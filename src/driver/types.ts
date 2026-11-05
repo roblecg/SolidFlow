@@ -26,6 +26,12 @@ export interface AutomationDriver {
   switchToMain(): Promise<void>;
   /** Select a window that is already open, or wait until that window is visible. */
   switchToWindow(query: WindowQuery, timeoutMs: number): Promise<void>;
+  /** Follow the system-browser page the app just opened. urlPart narrows which address to wait for. */
+  switchToBrowser(urlPart: string, timeoutMs: number): Promise<void>;
+  /** True after the open browser pages have been remembered. */
+  hasBrowserBaseline(): boolean;
+  /** Remember the browser pages showing now. Keeps an earlier snapshot when the new page is already in front. */
+  noteSystemBrowser(beforeSwitch: boolean): Promise<void>;
   /** Pages the connected app has open, by file name. */
   listSwitchWindows(): Promise<SwitchWindowChoice[]>;
   /** The focused native window is the web page commands are running against. */

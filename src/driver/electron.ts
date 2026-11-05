@@ -96,6 +96,8 @@ export class ElectronDriver extends PlaywrightBaseDriver {
   }
 
   nativeApp(): { pid: number; appPath: string; hwnd?: string } | null {
+    const external = this.externalApp();
+    if (external) return external;
     const appPath = this.ctx?.appPath;
     if (!appPath) return null;
     return {

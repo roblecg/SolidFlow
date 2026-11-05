@@ -44,6 +44,16 @@ export class UnavailableDriver implements AutomationDriver {
     throw new DriverNotAvailableError(this.kind);
   }
 
+  async switchToBrowser(_urlPart: string, _timeoutMs: number): Promise<void> {
+    throw new DriverNotAvailableError(this.kind);
+  }
+
+  hasBrowserBaseline(): boolean {
+    return false;
+  }
+
+  async noteSystemBrowser(_beforeSwitch: boolean): Promise<void> {}
+
   async listSwitchWindows(): Promise<SwitchWindowChoice[]> {
     return [];
   }

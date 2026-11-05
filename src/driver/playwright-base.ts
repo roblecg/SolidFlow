@@ -4,7 +4,18 @@ import { chromium, type Browser, type BrowserContext } from "playwright-core";
 import { FlowError, type DeviceInfo, type DriverKind } from "../types.js";
 import type { AutomationDriver, DriverContext } from "./types.js";
 import { defaultLocatorResolver } from "./locator.js";
-import { chooseNativePopup, isClassicDialog, listNativePopups, type NativePopup } from "./native-frame.js";
+import {
+  chooseNativePopup,
+  chooseOpenedBrowserPage,
+  focusSystemBrowser,
+  isClassicDialog,
+  listNativePopups,
+  readSystemBrowserUrl,
+  readSystemBrowsers,
+  type NativeApp,
+  type NativePopup,
+  type SystemBrowserPage
+} from "./native-frame.js";
 import { isAppPageUrl, isKcpsDesktop, isKcpsMainPageUrl } from "./electron-app.js";
 import { localeInitScript } from "./locale-init.js";
 import {
@@ -22,6 +33,10 @@ import type { Page } from "playwright-core";
 export abstract class PlaywrightBaseDriver implements AutomationDriver {
   abstract readonly kind: DriverKind;
   protected browser: Browser | null = null;
+  /** System browser the app opened. Commands use that window until switchToMain. */
+  private externalNative: NativeApp | null = null;
+  /** Addresses showing before the app opened a browser page. */
+  private browserBaseline: SystemBrowserPage[] | null = null;
   protected page: Page | null = null;
   protected ctx: DriverContext | null = null;
   private mainPage: Page | null = null;
@@ -68,6 +83,7 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     this.mainPage = null;
     this.adoptedPages.clear();
     this.clearFocusedWindow();
+    this.browserBaseline = null;
     this.nativePopupBaseline.clear();
     this.adoptedNativePopups.clear();
   }
@@ -145,6 +161,7 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
   }
 
   async useWebWindow(selector?: string): Promise<boolean> {
+    if (this.externalNative) return false;
     const focused = this.focusedNativeWindow;
     if (!focused || isClassicDialog(focused)) return false;
     const page =
@@ -165,6 +182,91 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     }
     this.page = this.mainPage;
     await this.mainPage.bringToFront().catch(() => {});
+  }
+
+  /**
+   * The app opened a page in the system browser. Later tapOn, inputText, and assertVisible
+   * use that window, so the account already signed in to Windows stays available.
+   * An empty address uses the page that appeared since the previous step.
+   */
+  async switchToBrowser(urlPart: string, timeoutMs: number): Promise<void> {
+    const needle = urlPart.trim();
+    if (process.platform !== "win32") {
+      throw new FlowError("switchToBrowser follows the system browser on Windows.");
+    }
+    if (!this.page) throw new FlowError("Connect the app before switching to the browser.");
+    if (!this.mainPage || this.mainPage.isClosed()) this.rememberMainPage();
+    const target = needle ? await this.waitForBrowserUrl(needle, timeoutMs) : await this.waitForOpenedBrowser(timeoutMs);
+    if (!target) {
+      throw new FlowError(
+        needle
+          ? `No browser page matched "${needle}". The app has to open that address in the system browser first.`
+          : "The app has not opened a page in the system browser."
+      );
+    }
+    const snap = await readSystemBrowsers();
+    if (snap) this.browserBaseline = snap.pages;
+    this.clearFocusedWindow();
+    this.externalNative = { pid: target.pid, appPath: target.appPath, hwnd: target.hwnd };
+    this.focusedNativeWindow = { hwnd: target.hwnd, title: "" };
+    await focusSystemBrowser(this.externalNative);
+  }
+
+  hasBrowserBaseline(): boolean {
+    return this.browserBaseline !== null;
+  }
+
+  /** Remember the browser pages now, unless the one switchToBrowser is waiting for is already open. */
+  async noteSystemBrowser(beforeSwitch: boolean): Promise<void> {
+    if (process.platform !== "win32") return;
+    const snap = await readSystemBrowsers();
+    if (!snap) return;
+    if (
+      beforeSwitch &&
+      snap.browser &&
+      this.browserBaseline &&
+      chooseOpenedBrowserPage(this.browserBaseline, snap.pages, snap.foreground, "")
+    ) {
+      return;
+    }
+    this.browserBaseline = snap.pages;
+  }
+
+  private async waitForBrowserUrl(needle: string, timeoutMs: number): Promise<SystemBrowserPage | null> {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const target = await readSystemBrowserUrl(needle);
+      if (target) return target;
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    return null;
+  }
+
+  private async waitForOpenedBrowser(timeoutMs: number): Promise<SystemBrowserPage | null> {
+    let before = this.browserBaseline;
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const snap = await readSystemBrowsers();
+      if (!snap) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+        continue;
+      }
+      if (!before) {
+        before = snap.pages;
+        this.browserBaseline = snap.pages;
+        await new Promise(resolve => setTimeout(resolve, 300));
+        continue;
+      }
+      const opened = chooseOpenedBrowserPage(before, snap.pages, snap.foreground, "");
+      if (opened) return opened;
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    return null;
+  }
+
+  /** The browser window commands are using, when switchToBrowser is active. */
+  protected externalApp(): NativeApp | null {
+    return this.externalNative;
   }
 
   webWindowFocused(): boolean {
@@ -189,10 +291,12 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
         );
       }
       if (found.kind === "web") {
+        this.externalNative = null;
         await this.useSwitchedPage(found.page, found.hwnd);
         return;
       }
       if (found.kind === "native") {
+        this.externalNative = null;
         this.focusedNativeWindow = found.hwnd;
         this.webWindow = false;
         this.adoptedNativePopups.add(found.hwnd.hwnd);
@@ -238,6 +342,7 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
   }
 
   async releaseClosedNativeWindow(): Promise<void> {
+    if (this.externalNative) return;
     const current = this.focusedNativeWindow;
     if (!current) return;
     const native = this.nativeApp();
@@ -273,7 +378,7 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
   }
 
   nativeApp(): { pid: number; appPath: string; hwnd?: string } | null {
-    return null;
+    return this.externalNative;
   }
 
   async takeScreenshot(name: string): Promise<string> {
@@ -332,6 +437,7 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
   }
 
   private focusNativePopup(popup: NativePopup): void {
+    this.externalNative = null;
     this.focusedNativeWindow = popup;
     this.webWindow = false;
     this.adoptedNativePopups.add(popup.hwnd);
@@ -340,10 +446,12 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
   private clearFocusedWindow(): void {
     this.focusedNativeWindow = null;
     this.webWindow = false;
+    this.externalNative = null;
   }
 
   /** Point commands at this page. waitForPopup still treats the page as new until it adopts it itself. */
   private async useSwitchedPage(page: Page, hwnd: NativePopup | null): Promise<void> {
+    this.externalNative = null;
     this.page = page;
     this.adoptedPages.add(page);
     if (hwnd && !isClassicDialog(hwnd)) {

@@ -271,6 +271,83 @@ function finiteBounds(value: { x?: number; y?: number; width?: number; height?: 
   return { x, y, width, height, ...(Number.isFinite(dpi) && dpi > 0 ? { dpi } : {}) };
 }
 
+export type SystemBrowserPage = { url: string; hwnd: string; pid: number; appPath: string };
+
+export type SystemBrowserSnapshot = { foreground: string; browser: boolean; pages: SystemBrowserPage[] };
+
+/** The page that appeared in the system browser since the previous snapshot. */
+export function chooseOpenedBrowserPage(
+  before: readonly SystemBrowserPage[],
+  current: readonly SystemBrowserPage[],
+  foregroundHwnd: string,
+  needle: string
+): SystemBrowserPage | null {
+  const wanted = needle.trim().toLowerCase();
+  const previous = new Map(before.map(page => [page.hwnd, page.url]));
+  const opened = current.filter(page => {
+    if (wanted && !page.url.toLowerCase().includes(wanted)) return false;
+    const seen = previous.get(page.hwnd);
+    return seen === undefined || seen !== page.url;
+  });
+  if (opened.length === 0) return null;
+  return opened.find(page => page.hwnd === foregroundHwnd) ?? (opened.length === 1 ? opened[0]! : null);
+}
+
+/** Addresses currently showing in Edge, Chrome, Firefox, Brave, and Opera. */
+export async function readSystemBrowsers(): Promise<SystemBrowserSnapshot | null> {
+  if (process.platform !== "win32") return null;
+  try {
+    const response = await helperRequest({ op: "browserPages" }, 12_000);
+    if (!response?.ok || !Array.isArray(response.pages)) return null;
+    const pages: SystemBrowserPage[] = [];
+    for (const page of response.pages) {
+      const parsed = browserPage(page);
+      if (parsed) pages.push(parsed);
+    }
+    return { foreground: (response.foreground ?? "").trim(), browser: response.browser === true, pages };
+  } catch {
+    return null;
+  }
+}
+
+function browserPage(page: { url?: string; hwnd?: string; procId?: number; image?: string } | undefined): SystemBrowserPage | null {
+  const url = (page?.url ?? "").trim();
+  const hwnd = (page?.hwnd ?? "").trim();
+  const appPath = (page?.image ?? "").trim();
+  const pid = Number(page?.procId);
+  if (!hwnd || !appPath || !Number.isInteger(pid) || pid <= 0) return null;
+  if (!/^https?:\/\//i.test(url)) return null;
+  return { url, hwnd, pid, appPath };
+}
+
+/** Bring the browser window that switchToBrowser found to the front. */
+export async function focusSystemBrowser(app: NativeApp): Promise<void> {
+  if (process.platform !== "win32" || !app.hwnd) return;
+  try {
+    await helperRequest({ op: "browserFocus", ...requestFields(app) }, 8_000);
+  } catch {
+    // The address already matched. Commands can still use the window if it stays in front.
+  }
+}
+
+/** The open system-browser window whose address bar contains fragment. */
+export async function readSystemBrowserUrl(fragment: string): Promise<SystemBrowserPage | null> {
+  const needle = fragment.trim().toLowerCase();
+  if (!needle || process.platform !== "win32") return null;
+  try {
+    const response = await helperRequest({ op: "browserUrl", text: fragment.trim() }, 8_000);
+    const url = (response?.url ?? "").trim();
+    const hwnd = (response?.hwnd ?? "").trim();
+    const appPath = (response?.image ?? "").trim();
+    const pid = Number(response?.procId);
+    if (!response?.ok || !hwnd || !appPath || !Number.isInteger(pid) || pid <= 0) return null;
+    if (!url.toLowerCase().includes(needle) || !/^https?:\/\//i.test(url)) return null;
+    return { url, hwnd, pid, appPath };
+  } catch {
+    return null;
+  }
+}
+
 export async function listTrayApps(): Promise<string[]> {
   return trayNames({ op: "trayApps" }, "Could not read the taskbar.");
 }
@@ -469,6 +546,13 @@ type HelperResponse = {
   visible?: boolean;
   text?: string;
   items?: string[];
+  url?: string;
+  hwnd?: string;
+  procId?: number;
+  image?: string;
+  foreground?: string;
+  browser?: boolean;
+  pages?: { url?: string; hwnd?: string; procId?: number; image?: string }[];
   windows?: {
     hwnd?: string;
     title?: string;

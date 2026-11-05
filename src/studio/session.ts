@@ -207,7 +207,7 @@ export async function pickAt(nx: number, ny: number): Promise<StudioNode | null>
     if (header) return header;
     const control = hitNode(layout.controls, x, y);
     if (control) return control;
-    if (layout.popup) return null;
+    if (layout.popup || isSystemBrowserApp(driver.nativeApp()?.appPath)) return null;
     const hint = await pagePixelHint(page);
     const point = imageToPage(layout, x, y, hint?.cssWidth ?? 1, hint?.cssHeight ?? 1);
     if (!point) return null;
@@ -434,6 +434,7 @@ export async function snapshot(): Promise<StudioSnapshot> {
   try {
     return await shareFrame(() => frameOf(automation, which));
   } catch (err) {
+    if (previewHold?.image) return previewHold;
     return {
       connected: false,
       target: which,
@@ -487,32 +488,44 @@ async function previewWindow(
   return { ...native, hwnd: popup.hwnd };
 }
 
+function isSystemBrowserApp(appPath: string | undefined): boolean {
+  const name = appPath?.split(/[/\\]/).pop()?.toLowerCase() ?? "";
+  return name === "msedge.exe" || name === "chrome.exe" || name === "firefox.exe" || name === "brave.exe" || name === "opera.exe";
+}
+
 async function frameOf(
   automation: AutomationDriver,
   sessionTarget: "app"
 ): Promise<StudioSnapshot> {
   const page = automation.getPage();
-  const buffer = await page.screenshot({ type: "png" });
   const hint = await pagePixelHint(page);
   // The connected app from the flow's appPath, not the SolidFlow studio window.
   const native = await previewWindow(automation.nativeApp(), page);
+  const browserWindow = isSystemBrowserApp(native?.appPath);
   const webWindow = automation.webWindowFocused();
-  const [hierarchy, captured] = await Promise.all([
-    captureHierarchy(page).catch(() => null),
-    native ? captureNativeFrame(native, hint) : Promise.resolve(null)
-  ]);
+  const captured = native ? await captureNativeFrame(native, browserWindow ? undefined : hint).catch(() => null) : null;
   let frame = captured;
   if (frame?.popup && webWindow) frame = { ...frame, popup: false };
-  let image = buffer;
+  const nativeView = Boolean(frame && (frame.popup || browserWindow));
+  const hierarchy = nativeView ? null : await captureHierarchy(page).catch(() => null);
+  let buffer: Buffer | null = null;
+  if (!nativeView && !browserWindow) {
+    try {
+      buffer = await page.screenshot({ type: "png", timeout: 4_000 });
+    } catch {
+      buffer = null;
+    }
+  }
+  let image = buffer ?? Buffer.alloc(0);
   let layout: FrameLayout | null = null;
-  if (frame?.popup) {
+  if (nativeView && frame) {
     try {
       image = presentFrame(frame.png);
     } catch {
       image = frame.png;
     }
     layout = frame;
-  } else if (frame && frame.client.y >= 8) {
+  } else if (frame && buffer && frame.client.y >= 8) {
     try {
       image = compositePageIntoFrame(frame.png, buffer, frame.client);
       layout = frame;
@@ -524,7 +537,7 @@ async function frameOf(
   lastLayout = layout;
   const cssW = hint?.cssWidth || 1;
   const cssH = hint?.cssHeight || 1;
-  const pageSize = pngSize(buffer);
+  const pageSize = buffer ? pngSize(buffer) : { width: frame?.width ?? 1, height: frame?.height ?? 1 };
   const scaleX = layout && !layout.popup ? layout.client.width / cssW : pageSize.width / cssW;
   const scaleY = layout && !layout.popup ? layout.client.height / cssH : pageSize.height / cssH;
   const nodes =
@@ -538,6 +551,9 @@ async function frameOf(
     );
   }
   const size = layout ?? pageSize;
+  if (image.length < 32) {
+    throw new Error("The browser window is not in the preview yet.");
+  }
   return {
     connected: true,
     target: sessionTarget,

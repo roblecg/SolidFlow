@@ -8,6 +8,7 @@ import {
   captionActionFor,
   captureNativeFrame,
   chooseNativePopup,
+  chooseOpenedBrowserPage,
   popupMatchingTitle,
   isClassicDialog,
   clipRect,
@@ -25,6 +26,10 @@ import {
   stopNativeFrameHost,
   type FrameLayout
 } from "../src/driver/native-frame.js";
+
+function page(hwnd: string, url: string) {
+  return { hwnd, url, pid: 1, appPath: "C:/browser.exe" };
+}
 
 const sample: FrameLayout = {
   title: "CIM Document Exporter",
@@ -66,6 +71,18 @@ describe("native window header", () => {
     expect(imageToPage(sample, 8, 40, 492, 326)).toEqual({ x: 0, y: 0 });
     expect(imageToPage(sample, 8 + 984, 40 + 652, 492, 326)).toEqual({ x: 492, y: 326 });
     expect(imageToPage(sample, 4, 10, 492, 326)).toBeNull();
+  });
+
+  it("chooses the browser page that just opened", () => {
+    const before = [page("1", "https://mail.example/inbox"), page("2", "https://work.example/board")];
+    const opened = page("1", "https://login.example/authorize");
+    expect(chooseOpenedBrowserPage(before, [opened, before[1]!], "1", "")).toEqual(opened);
+    expect(chooseOpenedBrowserPage(before, [before[0]!, before[1]!], "1", "")).toBeNull();
+    expect(chooseOpenedBrowserPage(before, [opened, page("2", "https://work.example/other")], "9", "")).toBeNull();
+    expect(chooseOpenedBrowserPage(before, [opened, page("3", "https://news.example")], "9", "")).toBeNull();
+    expect(chooseOpenedBrowserPage(before, [before[0]!, page("3", "https://news.example")], "1", "")?.hwnd).toBe("3");
+    expect(chooseOpenedBrowserPage(before, [opened, before[1]!], "1", "login.example")).toEqual(opened);
+    expect(chooseOpenedBrowserPage(before, [opened, before[1]!], "1", "work.example")).toBeNull();
   });
 
   it("keeps page targets out of the title bar", () => {

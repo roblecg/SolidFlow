@@ -164,6 +164,9 @@ namespace SolidFlow {
       if (op == "tray") return OpenTrayItem(procId, appPath, name ?? "", text ?? "");
       if (op == "trayList") return ListTrayItems(procId, appPath, text ?? "");
       if (op == "trayApps") return ListTrayApps();
+      if (op == "browserUrl") return FindBrowserUrl(text ?? "");
+      if (op == "browserPages") return ListBrowserPages();
+      if (op == "browserFocus") return FocusBrowser(ParseHwnd(hwndText));
       IntPtr requested = ParseHwnd(hwndText);
       bool specific = requested != IntPtr.Zero;
       if (specific && (op == "invoke" || op == "visible" || op == "value" || op == "read" || op == "caption")) {
@@ -189,6 +192,116 @@ namespace SolidFlow {
       if (op == "read") return ReadNamed(hwnd, name ?? "");
       if (op == "caption") return Caption(hwnd, action ?? "");
       return Capture(hwnd, op == "capture", popup);
+    }
+
+    static string FindBrowserUrl(string fragment) {
+      fragment = (fragment ?? "").Trim();
+      if (fragment.Length == 0) return "{\"ok\":false,\"error\":\"missing url\"}";
+      IntPtr foreground = GetForegroundWindow();
+      string foregroundUrl = BrowserAddress(foreground, fragment);
+      if (foregroundUrl.Length > 0) return BrowserJson(foreground, foregroundUrl);
+      string found = "";
+      IntPtr foundHwnd = IntPtr.Zero;
+      held = delegate(IntPtr hWnd, IntPtr lParam) {
+        try {
+          if (found.Length > 0 || hWnd == foreground) return true;
+          string url = BrowserAddress(hWnd, fragment);
+          if (url.Length == 0) return true;
+          found = url;
+          foundHwnd = hWnd;
+        } catch { }
+        return true;
+      };
+      try { EnumWindows(held, IntPtr.Zero); }
+      finally { held = null; }
+      if (found.Length == 0) return "{\"ok\":true,\"url\":\"\"}";
+      return BrowserJson(foundHwnd, found);
+    }
+
+    static string FocusBrowser(IntPtr hwnd) {
+      if (!IsSystemBrowser(hwnd)) return "{\"ok\":false,\"error\":\"window not found\"}";
+      FocusWindow(hwnd);
+      return "{\"ok\":true}";
+    }
+
+    static string ListBrowserPages() {
+      IntPtr foreground = GetForegroundWindow();
+      bool foregroundBrowser = IsSystemBrowser(foreground);
+      System.Collections.Generic.List<IntPtr> hits = new System.Collections.Generic.List<IntPtr>();
+      held = delegate(IntPtr hWnd, IntPtr lParam) {
+        try {
+          if (IsSystemBrowser(hWnd)) hits.Add(hWnd);
+        } catch { }
+        return true;
+      };
+      try { EnumWindows(held, IntPtr.Zero); }
+      finally { held = null; }
+      StringBuilder json = new StringBuilder();
+      json.Append("{\"ok\":true,\"foreground\":\"" + HwndText(foreground) + "\",\"browser\":" + (foregroundBrowser ? "true" : "false") + ",\"pages\":[");
+      bool first = true;
+      foreach (IntPtr hwnd in hits) {
+        string url = BrowserAddress(hwnd, "");
+        if (url.Length == 0) continue;
+        if (!first) json.Append(',');
+        first = false;
+        json.Append(PageJson(hwnd, url));
+      }
+      json.Append("]}");
+      return json.ToString();
+    }
+
+    static string PageJson(IntPtr hwnd, string url) {
+      uint pid;
+      GetWindowThreadProcessId(hwnd, out pid);
+      return "{\"url\":" + JsonString(url) + ",\"hwnd\":\"" + HwndText(hwnd) + "\",\"procId\":" + pid + ",\"image\":" + JsonString(ProcessPath(pid)) + "}";
+    }
+
+    static string BrowserJson(IntPtr hwnd, string url) {
+      uint pid;
+      GetWindowThreadProcessId(hwnd, out pid);
+      return "{\"ok\":true,\"url\":" + JsonString(url) + ",\"hwnd\":\"" + HwndText(hwnd) + "\",\"procId\":" + pid + ",\"image\":" + JsonString(ProcessPath(pid)) + "}";
+    }
+
+    static string BrowserAddress(IntPtr hwnd, string fragment) {
+      if (!IsSystemBrowser(hwnd)) return "";
+      try {
+        AutomationElement root = AutomationElement.FromHandle(hwnd);
+        if (root == null) return "";
+        PropertyCondition edits = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit);
+        AutomationElementCollection all = root.FindAll(TreeScope.Descendants, edits);
+        if (all == null) return "";
+        foreach (AutomationElement edit in all) {
+          string name = "";
+          try { name = edit.Current.Name ?? ""; } catch { }
+          if (name.IndexOf("address", StringComparison.OrdinalIgnoreCase) < 0 &&
+              name.IndexOf("search bar", StringComparison.OrdinalIgnoreCase) < 0) continue;
+          string value = EditValue(edit);
+          if (fragment.Length > 0 && value.IndexOf(fragment, StringComparison.OrdinalIgnoreCase) < 0) continue;
+          if (value.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+              value.StartsWith("http://", StringComparison.OrdinalIgnoreCase)) return value;
+        }
+      } catch { }
+      return "";
+    }
+
+    static bool IsSystemBrowser(IntPtr hwnd) {
+      if (hwnd == IntPtr.Zero || !IsWindowVisible(hwnd) || Cloaked(hwnd)) return false;
+      string name = "";
+      try { name = Path.GetFileName(ProcessPath((uint)WindowPid(hwnd))); } catch { return false; }
+      return name.Equals("msedge.exe", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("chrome.exe", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("firefox.exe", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("brave.exe", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("opera.exe", StringComparison.OrdinalIgnoreCase);
+    }
+
+    static string EditValue(AutomationElement edit) {
+      if (edit == null) return "";
+      object pattern;
+      if (!edit.TryGetCurrentPattern(ValuePattern.Pattern, out pattern)) return "";
+      ValuePattern value = pattern as ValuePattern;
+      if (value == null) return "";
+      return value.Current.Value ?? "";
     }
 
     static string Reveal(int procId, string appPath, int hintW, int hintH, int cssW, int cssH) {
@@ -420,6 +533,10 @@ namespace SolidFlow {
     }
 
     static AutomationElement FindNamed(AutomationElement root, string name) {
+      return FindNamed(root, name, false);
+    }
+
+    static AutomationElement FindNamed(AutomationElement root, string name, bool allowText) {
       if (root == null || string.IsNullOrWhiteSpace(name)) return null;
       AutomationElement byId = null;
       try {
@@ -443,7 +560,8 @@ namespace SolidFlow {
         if (field != null) return field;
       }
       if (byId != null && ControlRank(byId) <= 2) return byId;
-      return bestRank <= 2 ? best : null;
+      if (bestRank <= 2) return best;
+      return allowText && best != null ? best : null;
     }
 
     static bool ClickHwnd(IntPtr hwnd) {
@@ -516,7 +634,7 @@ namespace SolidFlow {
 
     static string InvokeNamed(IntPtr hwnd, string name) {
       try {
-        AutomationElement el = FindNamed(FromHwnd(hwnd), name);
+        AutomationElement el = FindNamed(FromHwnd(hwnd), name, IsSystemBrowser(hwnd));
         if (el == null) return "{\"ok\":false,\"error\":" + JsonString(name + " is not in " + WindowTitle(hwnd)) + "}";
         if (!Act(el, hwnd)) return "{\"ok\":false,\"error\":" + JsonString(name + " is not ready in " + WindowTitle(hwnd)) + "}";
         return "{\"ok\":true}";
@@ -528,7 +646,7 @@ namespace SolidFlow {
     static string VisibleNamed(IntPtr hwnd, string name) {
       try {
         if (string.Equals(WindowTitle(hwnd), name, StringComparison.OrdinalIgnoreCase)) return "{\"ok\":true,\"visible\":true}";
-        AutomationElement el = FindNamed(FromHwnd(hwnd), name);
+        AutomationElement el = FindNamed(FromHwnd(hwnd), name, IsSystemBrowser(hwnd));
         if (el == null) return "{\"ok\":true,\"visible\":false}";
         bool visible = !el.Current.IsOffscreen;
         return "{\"ok\":true,\"visible\":" + (visible ? "true" : "false") + "}";
@@ -643,7 +761,7 @@ namespace SolidFlow {
           if (ForegroundIs(hwnd) && TypeText(text ?? "")) return "{\"ok\":true}";
           return "{\"ok\":false,\"error\":" + JsonString("The text field is not ready in " + WindowTitle(hwnd)) + "}";
         }
-        AutomationElement el = FindNamed(root, name);
+        AutomationElement el = FindNamed(root, name, IsSystemBrowser(hwnd));
         if (el == null) return "{\"ok\":false,\"error\":" + JsonString(name + " is not in " + WindowTitle(hwnd)) + "}";
         if (!WriteText(el, text)) return "{\"ok\":false,\"error\":" + JsonString(name + " cannot be edited") + "}";
         return "{\"ok\":true}";
@@ -655,7 +773,7 @@ namespace SolidFlow {
     static string ReadNamed(IntPtr hwnd, string name) {
       try {
         AutomationElement root = FromHwnd(hwnd);
-        AutomationElement el = string.IsNullOrWhiteSpace(name) ? FilenameEdit(root) : FindNamed(root, name);
+        AutomationElement el = string.IsNullOrWhiteSpace(name) ? FilenameEdit(root) : FindNamed(root, name, IsSystemBrowser(hwnd));
         if (el == null) return "{\"ok\":false,\"error\":" + JsonString((name.Length == 0 ? "The text field" : name) + " is not in " + WindowTitle(hwnd)) + "}";
         return "{\"ok\":true,\"text\":" + JsonString(ReadText(el)) + "}";
       } catch (Exception ex) {
@@ -699,8 +817,59 @@ namespace SolidFlow {
       }
     }
 
+    static string BrowserKind(ControlType type) {
+      if (type == ControlType.Button || type == ControlType.SplitButton || type == ControlType.ListItem || type == ControlType.DataItem) return "button";
+      if (type == ControlType.Edit) return "edit";
+      if (type == ControlType.ComboBox) return "combo";
+      if (type == ControlType.CheckBox || type == ControlType.RadioButton) return "check";
+      if (type == ControlType.Hyperlink) return "link";
+      if (type == ControlType.Text) return "text";
+      return "";
+    }
+
+    static string BrowserPageControls(IntPtr hwnd, int originX, int originY, int captionH) {
+      try {
+        AutomationElement root = FromHwnd(hwnd);
+        if (root == null) return "[]";
+        AutomationElement doc = null;
+        try {
+          doc = root.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document));
+        } catch { }
+        AutomationElement scope = doc ?? root;
+        AutomationElementCollection all = scope.FindAll(TreeScope.Descendants, Condition.TrueCondition);
+        StringBuilder json = new StringBuilder();
+        json.Append('[');
+        bool first = true;
+        int count = 0;
+        int texts = 0;
+        if (all != null) {
+          foreach (AutomationElement el in all) {
+            if (count >= 80) break;
+            string kind = "";
+            try { kind = BrowserKind(el.Current.ControlType); } catch { continue; }
+            if (kind.Length == 0) continue;
+            string label = "";
+            try { label = (el.Current.Name ?? "").Trim(); } catch { continue; }
+            if (label.Length == 0 || label.Length > 180) continue;
+            int x, y, w, h;
+            if (!TryBounds(el, originX, originY, captionH, out x, out y, out w, out h)) continue;
+            if (kind == "text") {
+              if (texts >= 12 || h > 64) continue;
+              texts++;
+            }
+            AppendControl(json, ref first, ref count, label, kind, x, y, w, h);
+          }
+        }
+        json.Append(']');
+        return json.ToString();
+      } catch {
+        return "[]";
+      }
+    }
+
     static string ControlJson(IntPtr hwnd, int originX, int originY, int captionH) {
       try {
+        if (IsSystemBrowser(hwnd)) return BrowserPageControls(hwnd, originX, originY, captionH);
         AutomationElement root = FromHwnd(hwnd);
         ControlType[] types = new ControlType[] {
           ControlType.Button, ControlType.SplitButton, ControlType.Edit, ControlType.ComboBox,
@@ -780,6 +949,9 @@ namespace SolidFlow {
       int cy = haveClient && !iconic ? screenY - ext.Top : CaptionHeight(hwnd);
       if (cx < 0 || cx > 64) cx = 0;
       if (cy < 0 || cy > imgH / 2) cy = 0;
+      // Edge draws its own title inside the page, so the caption inset can be zero.
+      // The preview still needs the whole window image.
+      if (IsSystemBrowser(hwnd) && cy < 8) cy = Math.Min(48, Math.Max(32, CaptionHeight(hwnd)));
       if (clientW < 20 || clientH < 20 || iconic) {
         int border = cx > 0 ? cx : Border(hwnd);
         int caption = cy >= 8 ? cy : CaptionHeight(hwnd);
@@ -810,7 +982,8 @@ namespace SolidFlow {
         Bitmap image = null;
         try {
           image = iconic ? null : Grab(hwnd, winW, winH, cropX, cropY, imgW, imgH, cy);
-          bool blank = image == null || (!popup && TitleBlank(image, cy));
+          bool browser = IsSystemBrowser(hwnd);
+          bool blank = image == null || (!popup && !browser && TitleBlank(image, cy));
           if (blank) {
             if (image != null) image.Dispose();
             image = new Bitmap(imgW, imgH, PixelFormat.Format32bppArgb);
@@ -832,7 +1005,7 @@ namespace SolidFlow {
       }
 
       int buttonWidth = Math.Max(0, imgW - bx);
-      string controls = popup ? ControlJson(hwnd, ext.Left, ext.Top, cy) : "[]";
+      string controls = popup || IsSystemBrowser(hwnd) ? ControlJson(hwnd, ext.Left, ext.Top, cy) : "[]";
       return "{\"ok\":true,\"title\":" + JsonString(title)
         + ",\"popup\":" + (popup ? "true" : "false")
         + ",\"controls\":" + controls
@@ -845,6 +1018,10 @@ namespace SolidFlow {
     }
 
     static Bitmap Grab(IntPtr hwnd, int winW, int winH, int cropX, int cropY, int imgW, int imgH, int titleH) {
+      if (IsSystemBrowser(hwnd)) {
+        Bitmap screen = GrabBrowser(hwnd, imgW, imgH);
+        if (screen != null) return screen;
+      }
       Bitmap full = TryPrint(hwnd, winW, winH, 2);
       Bitmap cropped = Crop(full, cropX, cropY, imgW, imgH);
       if (full != null) full.Dispose();
@@ -865,6 +1042,19 @@ namespace SolidFlow {
 
       if (GetForegroundWindow() == hwnd) cropped = TryScreen(hwnd, imgW, imgH);
       return cropped;
+    }
+
+    static Bitmap GrabBrowser(IntPtr hwnd, int imgW, int imgH) {
+      RECT ext;
+      if (DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out ext, Marshal.SizeOf(typeof(RECT))) != 0) return null;
+      int cx = ext.Left + Math.Max(1, (ext.Right - ext.Left) / 2);
+      int cy = ext.Top + Math.Max(1, (ext.Bottom - ext.Top) / 2);
+      POINT point = new POINT();
+      point.X = cx;
+      point.Y = cy;
+      IntPtr hit = WindowFromPoint(point);
+      if (hit == IntPtr.Zero || GetAncestor(hit, 2) != GetAncestor(hwnd, 2)) return null;
+      return TryScreen(hwnd, imgW, imgH);
     }
 
     static Bitmap TryScreen(IntPtr hwnd, int imgW, int imgH) {
