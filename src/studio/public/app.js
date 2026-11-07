@@ -30,7 +30,9 @@ let mode = "inspect";
 const channel = new BroadcastChannel("solidFlow-studio");
 
 function setStatus(text, kind) {
-  statusEl.textContent = text;
+  const message = String(text || "").replace(/\s+/g, " ").trim();
+  // The bar only fits a short word. The full error is already in App logs.
+  statusEl.textContent = message.length > 24 ? (kind === "bad" ? "Failed" : "") : message;
   statusEl.className = "status " + (kind || "muted");
 }
 
@@ -204,15 +206,6 @@ function applyEditorText(next) {
   return true;
 }
 
-function formatStatus(issues, changed) {
-  if (issues.length) {
-    const preview = issues.slice(0, 2).join("; ");
-    const more = issues.length > 2 ? ` (+${issues.length - 2} more)` : "";
-    return preview + more;
-  }
-  return changed ? "Formatted" : "No spacing changes";
-}
-
 async function formatDocument() {
   try {
     const before = editor.value;
@@ -222,7 +215,8 @@ async function formatDocument() {
     });
     const changed = result.content !== before;
     if (changed) applyEditorText(result.content);
-    setStatus(formatStatus(result.issues || [], changed), "ok");
+    const issues = result.issues || [];
+    setStatus(issues.length ? "Check the flow" : changed ? "Formatted" : "No changes", issues.length ? "bad" : "ok");
   } catch (err) {
     setStatus(err.message, "bad");
   }
@@ -430,7 +424,7 @@ async function openFile(path) {
 
 async function save() {
   if (!currentPath) {
-    setStatus("Create or open a flow first", "bad");
+    setStatus("Open a flow", "bad");
     return;
   }
   const result = await api("/api/file", {
@@ -439,8 +433,7 @@ async function save() {
   });
   if (result.content !== undefined) applyEditorText(result.content);
   markClean();
-  const issues = result.issues || [];
-  setStatus(issues.length ? `Saved ${currentPath} — ${formatStatus(issues, true)}` : `Saved ${currentPath}`, "ok");
+  setStatus(result.issues?.length ? "Check the flow" : "Saved", result.issues?.length ? "bad" : "ok");
 }
 
 function renderSnapshot(snap) {
@@ -499,11 +492,11 @@ async function pickElement(nx, ny, clientX, clientY) {
       ? local
       : await api("/api/pick", { method: "POST", body: JSON.stringify({ nx, ny }) });
     if (!hit || !hit.selector) {
-      setStatus("No element under the pointer. Click a button, field, or radio.", "bad");
+      setStatus("No element there", "bad");
       return;
     }
     selected = hit;
-    setStatus("Choose a command for " + (hit.label || hit.selector), "ok");
+    setStatus("Choose a command", "ok");
     await showMenu(clientX, clientY, hit);
   } catch (err) {
     setStatus(err.message, "bad");
@@ -592,7 +585,7 @@ async function connect() {
   setStatus("Connecting app…");
   try {
     if (!currentPath) {
-      setStatus("Open a flow and set appPath to the exe.", "bad");
+      setStatus("Open a flow", "bad");
       return;
     }
     const started = await api("/api/session", {
@@ -692,12 +685,12 @@ runBtn.onclick = async () => {
     return;
   }
   if (!/\.ya?ml$/i.test(currentPath)) {
-    setStatus("Open a YAML flow to run it", "bad");
+    setStatus("Open a flow", "bad");
     return;
   }
   testRunning = true;
   setRunButton("stop");
-  setStatus("Running on the app window…");
+  setStatus("Running");
   showLogTab("test");
   window.clearInterval(poll);
   poll = 0;
@@ -727,10 +720,10 @@ runBtn.onclick = async () => {
     } else if (result.status === "stopped") {
       setStatus("Stopped", "muted");
     } else {
-      setStatus(result.error || "Failed", "bad");
+      setStatus("Failed", "bad");
     }
-  } catch (err) {
-    setStatus(err.message, "bad");
+  } catch {
+    setStatus("Failed", "bad");
   } finally {
     testRunning = false;
     setRunButton("run");
@@ -1614,7 +1607,7 @@ async function confirmFolder() {
     const preferred = findPreferredFlow(treeState.children);
     if (preferred) await openFile(preferred.path);
     const created = workspaceState.created || [];
-    setStatus((created.length ? "Created workspace " : "Workspace ") + folderName(workspaceState.path), "ok");
+    setStatus(created.length ? "Workspace created" : "Workspace set", "ok");
   } catch (err) {
     folderDone.disabled = false;
     setStatus(err.message, "bad");
