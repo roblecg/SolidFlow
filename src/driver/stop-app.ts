@@ -9,6 +9,9 @@ export type RunningProcess = {
   name: string;
   executablePath: string;
   commandLine: string;
+  parentPid?: number;
+  /** Start time in epoch milliseconds. */
+  created?: number;
 };
 
 export type StopTarget = {
@@ -52,8 +55,8 @@ const COMMAND_MATCH = new Set(["msedge.exe", "msedgewebview2.exe"]);
 
 /**
  * Pids to terminate for one connected app.
- * The launched pid, every remaining copy of that exe, and WebView2 or Chromium
- * processes started for its profile or debugging port.
+ * The launched pid, every remaining copy of that exe, WebView2 or Chromium
+ * processes started for its profile or debugging port, and the processes those started.
  */
 export function pidsToStop(
   running: readonly RunningProcess[],
@@ -75,15 +78,75 @@ export function pidsToStop(
   for (const proc of running) {
     if (belongsToApp(proc, appName, appPath, data, target.debugPort)) add(proc.pid);
   }
+  const byPid = new Map(running.map(proc => [proc.pid, proc]));
+  for (let i = 0; i < chosen.length; i++) {
+    const parent = byPid.get(chosen[i]!);
+    for (const proc of running) {
+      if (proc.parentPid === chosen[i] && startedBy(proc, parent)) add(proc.pid);
+    }
+  }
   return chosen;
+}
+
+/** A Windows pid can be reused, so a child must have started after its parent. Shell processes such as the system browser stay open. */
+function startedBy(child: RunningProcess, parent: RunningProcess | undefined): boolean {
+  if (PROTECTED.has(child.name.trim().toLowerCase())) return false;
+  if (!parent?.created || !child.created) return true;
+  return child.created >= parent.created;
 }
 
 export async function stopLaunchedApp(target: StopTarget): Promise<void> {
   const exclude = [process.pid, process.ppid ?? 0];
-  const running = process.platform === "win32" ? await listProcesses() : [];
-  for (const pid of pidsToStop(running, target, exclude)) {
-    await killPid(pid);
+  if (process.platform !== "win32") {
+    for (const pid of pidsToStop([], target, exclude)) killPid(pid);
+    return;
   }
+  const running = await listProcesses();
+  if (!running) {
+    if (target.pid) await killTree(target.pid);
+    return;
+  }
+  for (const pid of pidsToStop(running, target, exclude)) killPid(pid);
+}
+
+export type LaunchExit = "starting" | "handedOff" | "closed";
+
+export type LaunchedApp = {
+  pid: number;
+  appPath: string;
+  /** Epoch milliseconds just before the spawn. */
+  startedAt: number;
+  debugPort: number;
+};
+
+/**
+ * Why an exe closed before its debugging port opened.
+ * A launcher leaves the process it started. A single-instance app hands the launch
+ * to a copy that was already open and closes.
+ */
+export function classifyLaunchExit(running: readonly RunningProcess[], launch: LaunchedApp): LaunchExit {
+  const appName = basename(launch.appPath).toLowerCase();
+  const others = running.filter(proc => proc.pid !== launch.pid);
+  const startedNow = others.filter(proc => (proc.created ?? 0) >= launch.startedAt);
+  if (
+    startedNow.some(
+      proc => proc.parentPid === launch.pid || hasDebuggingPort(proc.commandLine, launch.debugPort)
+    )
+  ) {
+    return "starting";
+  }
+  const alreadyOpen = others.some(
+    proc =>
+      (proc.created ?? 0) < launch.startedAt &&
+      (proc.name.trim().toLowerCase() === appName || samePath(proc.executablePath, launch.appPath))
+  );
+  return alreadyOpen ? "handedOff" : "closed";
+}
+
+export async function launchExit(launch: LaunchedApp): Promise<LaunchExit> {
+  if (process.platform !== "win32") return "closed";
+  const running = await listProcesses();
+  return running ? classifyLaunchExit(running, launch) : "starting";
 }
 
 function belongsToApp(
@@ -124,16 +187,17 @@ function hasDebuggingPort(commandLine: string, port: number): boolean {
   return false;
 }
 
-async function killPid(pid: number): Promise<void> {
-  if (process.platform === "win32") {
-    await execFileAsync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }).catch(() => {});
-    return;
-  }
+/** Terminates one process right away. taskkill spends about a second per call. */
+function killPid(pid: number): void {
   try {
     process.kill(pid);
   } catch {
-    // already gone
+    // already gone, or owned by another session
   }
+}
+
+async function killTree(pid: number): Promise<void> {
+  await execFileAsync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }).catch(() => {});
 }
 
 const LIST_PROCESSES = [
@@ -144,31 +208,48 @@ const LIST_PROCESSES = [
   "Get-CimInstance Win32_Process | ForEach-Object {",
   "  $cmd = [string]$_.CommandLine",
   "  if ($cmd -notmatch 'solidFlow-|--remote-debugging-port=|--webview-exe-name=') { $cmd = '' }",
-  "  Write-Output (\"{0}`t{1}`t{2}`t{3}\" -f $_.ProcessId, (Clean $_.Name), (Clean $_.ExecutablePath), (Clean $cmd))",
+  "  $created = 0",
+  "  if ($_.CreationDate) { $created = ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }",
+  "  Write-Output (\"{0}`t{1}`t{2}`t{3}`t{4}`t{5}\" -f $_.ProcessId, (Clean $_.Name), (Clean $_.ExecutablePath), (Clean $cmd), $_.ParentProcessId, $created)",
   "}"
 ].join("; ");
 
-async function listProcesses(): Promise<RunningProcess[]> {
+/** Null when Windows could not list processes. */
+async function listProcesses(): Promise<RunningProcess[] | null> {
   try {
     const { stdout } = await execFileAsync(
       "powershell.exe",
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", LIST_PROCESSES],
       { windowsHide: true, timeout: 8_000, maxBuffer: 4 * 1024 * 1024 }
     );
-    return String(stdout)
-      .split(/\r?\n/)
-      .map(parseProcessLine)
-      .filter((proc): proc is RunningProcess => proc !== null);
+    return parseProcessList(String(stdout));
   } catch {
-    return [];
+    return null;
   }
+}
+
+export function parseProcessList(stdout: string): RunningProcess[] {
+  return stdout
+    .split(/\r?\n/)
+    .map(parseProcessLine)
+    .filter((proc): proc is RunningProcess => proc !== null);
 }
 
 function parseProcessLine(line: string): RunningProcess | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
-  const [pidText, name = "", executablePath = "", commandLine = ""] = trimmed.split("\t");
+  const [pidText, name = "", executablePath = "", commandLine = "", parentText = "", createdText = ""] =
+    trimmed.split("\t");
   const pid = Number(pidText);
   if (!Number.isInteger(pid) || pid <= 0) return null;
-  return { pid, name, executablePath, commandLine };
+  const parentPid = Number(parentText);
+  const created = Number(createdText);
+  return {
+    pid,
+    name,
+    executablePath,
+    commandLine,
+    ...(Number.isInteger(parentPid) && parentPid > 0 ? { parentPid } : {}),
+    ...(Number.isFinite(created) && created > 0 ? { created } : {})
+  };
 }

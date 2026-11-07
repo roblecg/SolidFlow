@@ -3,10 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Page } from "playwright-core";
-import type { DriverKind, DeviceInfo } from "../types.js";
+import { RunStoppedError, type DriverKind, type DeviceInfo } from "../types.js";
 import type { DriverContext } from "./types.js";
 import { revealNativeWindow, stopNativeFrameHost } from "./native-frame.js";
-import { PlaywrightBaseDriver } from "./playwright-base.js";
+import { cdpBlockedMessage, cdpProbeBlocked, PlaywrightBaseDriver, readCdpJson } from "./playwright-base.js";
 import { stopLaunchedApp } from "./stop-app.js";
 import { getFreePort } from "../util/port.js";
 import {
@@ -43,6 +43,7 @@ export class ElectronDriver extends PlaywrightBaseDriver {
     ctx.userDataDir = this.userDataDir;
 
     const appPath = ctx.appPath;
+    if (this.stopped || ctx.signal?.aborted) throw new RunStoppedError();
     this.child = spawn(appPath, electronLaunchArgs(this.debugPort, this.userDataDir), {
       cwd: dirname(appPath),
       stdio: "ignore",
@@ -56,12 +57,12 @@ export class ElectronDriver extends PlaywrightBaseDriver {
     });
 
     try {
-      const wsUrl = await this.waitUntilReady(this.debugPort, 90_000);
+      const wsUrl = await this.waitUntilReady(this.debugPort, 90_000, ctx.signal);
       await this.connectOverCdp(wsUrl);
       this.preferAppPage();
       this.ready = true;
       await this.getPage().waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
-      await this.revealMainWindow();
+      await this.revealMainWindow(ctx.signal);
       await this.rememberNativePopups();
       this.adoptOpenPages();
     } catch (err) {
@@ -84,7 +85,7 @@ export class ElectronDriver extends PlaywrightBaseDriver {
   async clearState(): Promise<void> {
     if (this.userDataDir) {
       await this.disconnect();
-      await rm(this.userDataDir, { recursive: true, force: true });
+      await rm(this.userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       this.userDataDir = await mkdtemp(join(tmpdir(), "solidFlow-electron-"));
       if (this.ctx) this.ctx.userDataDir = this.userDataDir;
     }
@@ -111,13 +112,14 @@ export class ElectronDriver extends PlaywrightBaseDriver {
     return this.userDataDir || this.ctx?.userDataDir;
   }
 
-  private async revealMainWindow(): Promise<void> {
+  private async revealMainWindow(signal?: AbortSignal): Promise<void> {
     const appPath = this.ctx?.appPath;
     const pid = this.child?.pid ?? 0;
     if (!appPath || !pid) return;
     const deadline = Date.now() + 8_000;
     while (Date.now() < deadline) {
-      if (this.exitReason) return;
+      if (this.exitReason || this.stopped) return;
+      if (signal?.aborted) throw new RunStoppedError();
       if (await revealNativeWindow({ pid, appPath })) return;
       await new Promise(resolve => setTimeout(resolve, 250));
     }
@@ -145,13 +147,20 @@ export class ElectronDriver extends PlaywrightBaseDriver {
     return pages;
   }
 
-  private async waitUntilReady(port: number, timeoutMs: number): Promise<string> {
+  private async waitUntilReady(port: number, timeoutMs: number, signal?: AbortSignal): Promise<string> {
     const started = Date.now();
     let wsUrl = "";
+    let timeouts = 0;
     while (Date.now() - started < timeoutMs) {
+      if (signal?.aborted || this.stopped) throw new RunStoppedError();
       if (this.exitReason) throw new Error(this.exitReason);
-      if (!wsUrl) wsUrl = await this.readDebuggerUrl(port);
-      if (wsUrl && (await this.hasAppPage(port))) return wsUrl;
+      if (!wsUrl) {
+        const version = await readCdpJson<{ webSocketDebuggerUrl?: string }>(port, "/json/version", signal);
+        wsUrl = version.value?.webSocketDebuggerUrl ?? "";
+        timeouts = version.timedOut ? timeouts + 1 : 0;
+        if (cdpProbeBlocked(timeouts)) throw new Error(cdpBlockedMessage(port));
+      }
+      if (wsUrl && (await this.hasAppPage(port, signal))) return wsUrl;
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     if (this.exitReason) throw new Error(this.exitReason);
@@ -160,26 +169,9 @@ export class ElectronDriver extends PlaywrightBaseDriver {
     throw new Error(electronWindowTimeoutMessage(appPath, port));
   }
 
-  private async readDebuggerUrl(port: number): Promise<string> {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (!res.ok) return "";
-      const json = (await res.json()) as { webSocketDebuggerUrl?: string };
-      return json.webSocketDebuggerUrl ?? "";
-    } catch {
-      return "";
-    }
-  }
-
-  private async hasAppPage(port: number): Promise<boolean> {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/json/list`);
-      if (!res.ok) return false;
-      const list = (await res.json()) as CdpTarget[];
-      return list.some(target => target.type === "page" && isAppPageUrl(target.url ?? ""));
-    } catch {
-      return false;
-    }
+  private async hasAppPage(port: number, signal?: AbortSignal): Promise<boolean> {
+    const list = await readCdpJson<CdpTarget[]>(port, "/json/list", signal);
+    return (list.value ?? []).some(target => target.type === "page" && isAppPageUrl(target.url ?? ""));
   }
 
   private async stopProcess(): Promise<void> {

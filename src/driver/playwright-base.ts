@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type Browser, type BrowserContext } from "playwright-core";
-import { FlowError, type DeviceInfo, type DriverKind } from "../types.js";
+import { FlowError, RunStoppedError, type DeviceInfo, type DriverKind } from "../types.js";
 import type { AutomationDriver, DriverContext } from "./types.js";
 import { defaultLocatorResolver } from "./locator.js";
 import {
@@ -718,27 +718,59 @@ export abstract class PlaywrightBaseDriver implements AutomationDriver {
     return pages;
   }
 
+  /** Empty when `ended` reports the launched app is gone. */
   protected async waitForCdpEndpoint(
     port: number,
-    timeoutMs = 60_000
+    timeoutMs = 60_000,
+    until: { signal?: AbortSignal; ended?: () => boolean } = {}
   ): Promise<string> {
     const started = Date.now();
+    let timeouts = 0;
     while (Date.now() - started < timeoutMs) {
-      try {
-        const res = await fetch(`http://127.0.0.1:${port}/json/version`);
-        if (res.ok) {
-          const json = (await res.json()) as { webSocketDebuggerUrl?: string };
-          if (json.webSocketDebuggerUrl) {
-            return json.webSocketDebuggerUrl;
-          }
-        }
-      } catch {
-        // retry
-      }
+      if (until.signal?.aborted) throw new RunStoppedError();
+      if (until.ended?.()) return "";
+      const version = await readCdpJson<{ webSocketDebuggerUrl?: string }>(port, "/json/version", until.signal);
+      if (version.value?.webSocketDebuggerUrl) return version.value.webSocketDebuggerUrl;
+      timeouts = version.timedOut ? timeouts + 1 : 0;
+      if (cdpProbeBlocked(timeouts)) throw new Error(cdpBlockedMessage(port));
       await new Promise(r => setTimeout(r, 500));
     }
     throw new Error(`CDP did not become ready on port ${port}`);
   }
+}
+
+const CDP_PROBE_MS = 2_000;
+/** A port that is still opening refuses at once, so probes that keep timing out mean the connection is blocked. */
+const CDP_BLOCKED_PROBES = 8;
+
+export async function readCdpJson<T>(
+  port: number,
+  path: string,
+  signal?: AbortSignal
+): Promise<{ value: T | null; timedOut: boolean }> {
+  const timeout = AbortSignal.timeout(CDP_PROBE_MS);
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout
+    });
+    if (!res.ok) return { value: null, timedOut: false };
+    return { value: (await res.json()) as T, timedOut: false };
+  } catch (err) {
+    const code = (err as { cause?: { code?: string } } | null)?.cause?.code;
+    return { value: null, timedOut: timeout.aborted || code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT" };
+  }
+}
+
+export function cdpProbeBlocked(timeouts: number): boolean {
+  return timeouts >= CDP_BLOCKED_PROBES;
+}
+
+export function cdpBlockedMessage(port: number): string {
+  return (
+    `The app opened debugging port ${port}, but every connection to it times out. ` +
+    "Security software on this PC is blocking Chromium debugging ports. " +
+    "Ask IT to allow local connections to the app's debugging port, then connect again."
+  );
 }
 
 /** The element's own text, so a heading matches without also matching the paragraph under it. */

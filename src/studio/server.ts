@@ -115,6 +115,7 @@ export async function startStudio(port = 4317, options: { openBrowser?: boolean 
 
   await new Promise<void>(resolve => {
     const shutdown = () => {
+      runAbort?.abort();
       void stopSession().finally(() => {
         server.close(() => resolve());
       });
@@ -243,7 +244,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     runAbort.abort();
     liveRun.command = "Stopping…";
     liveRun.status = "stopping";
-    appLog("info", "Stop requested — finishing the current step, then ending the run");
+    appLog("info", "Stop requested — ending the run");
     sendJson(res, 200, { ok: true, stopped: true });
     return;
   }

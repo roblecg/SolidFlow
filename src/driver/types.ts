@@ -12,6 +12,8 @@ export type DriverContext = {
   viewport?: { width: number; height: number };
   userDataDir?: string;
   screenshotDir?: string;
+  /** Ends the wait for the app to start. */
+  signal?: AbortSignal;
 };
 
 export interface AutomationDriver {

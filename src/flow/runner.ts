@@ -51,9 +51,12 @@ import {
 
 const activeAppLocks = new Set<string>();
 const FIELD_WAIT_MS = 20_000;
+const STOP_GRACE_MS = 2_000;
 
 type ExecState = {
   driver: AutomationDriver | null;
+  /** The app being launched, until connect returns. */
+  connecting?: AutomationDriver | null;
   env: Record<string, string>;
   flowDir: string;
   screenshotDir: string;
@@ -71,12 +74,15 @@ export type RunnerOptions = RunOptions & {
   driverSlot?: DriverSlot;
   /** Chromium start page. Desktop flows launch appPath instead. */
   pageUrl?: string;
-  /** When aborted, finish the current step then stop before the next one. */
+  /**
+   * When aborted, the run ends. A step still running after a short grace has its app closed,
+   * so it cannot keep clicking after the run reports stopped.
+   */
   signal?: AbortSignal;
   onStep?: (event: {
     index: number;
     command: string;
-    status: "running" | "passed" | "failed";
+    status: "running" | "passed" | "failed" | "skipped";
     durationMs?: number;
     error?: string;
     sectionNumber?: number;
@@ -197,25 +203,40 @@ async function runFlowOnce(
         const t0 = Date.now();
         const command = formatStep(step);
         options.onStep?.({ index: i, command, status: "running", sectionNumber });
+        const stopHere = () => {
+          status = "stopped";
+          runError = new RunStoppedError();
+          stepReport = { index: i, command, status: "skipped", durationMs: Date.now() - t0, sectionNumber };
+          steps.push(stepReport);
+          options.onStep?.({ index: i, command, status: "skipped", durationMs: stepReport.durationMs, sectionNumber });
+        };
         try {
-          if (usesBrowser && state.driver && commandName(step) !== "switchToBrowser") {
-            const nextIsSwitch = i + 1 < execSteps.length && commandName(execSteps[i + 1]!) === "switchToBrowser";
-            if (nextIsSwitch || !state.driver.hasBrowserBaseline()) {
-              await state.driver.noteSystemBrowser(nextIsSwitch);
+          const work = (async () => {
+            if (usesBrowser && state.driver && commandName(step) !== "switchToBrowser") {
+              const nextIsSwitch = i + 1 < execSteps.length && commandName(execSteps[i + 1]!) === "switchToBrowser";
+              if (nextIsSwitch || !state.driver.hasBrowserBaseline()) {
+                await state.driver.noteSystemBrowser(nextIsSwitch);
+              }
             }
+            await executeStep(step, state, flow, {
+              appPath,
+              driverKind,
+              pageUrl,
+              locale: flow.locale ?? "en",
+              headless: options.headless,
+              screenshotDir,
+              reportDir,
+              flowPath,
+              paceMs,
+              sectionName,
+              signal: options.signal
+            });
+          })();
+          if (await stoppedDuring(work, options.signal, () => closeRunApp(state))) {
+            stopHere();
+            break;
           }
-          await executeStep(step, state, flow, {
-            appPath,
-            driverKind,
-            pageUrl,
-            locale: flow.locale ?? "en",
-            headless: options.headless,
-            screenshotDir,
-            reportDir,
-            flowPath,
-            paceMs,
-            sectionName
-          });
+          await work;
           if (state.driver) await options.onPreview?.(state.driver).catch(() => {});
           if (paceMs) await delay(paceMs, options.signal);
           stepReport = {
@@ -236,8 +257,12 @@ async function runFlowOnce(
           });
           break;
         } catch (err) {
+          if (options.signal?.aborted) {
+            stopHere();
+            break;
+          }
           const msg = err instanceof Error ? err.message : String(err);
-          if (attempt < stepRetry && !options.signal?.aborted) {
+          if (attempt < stepRetry) {
             await delay(500, options.signal);
             continue;
           }
@@ -332,6 +357,7 @@ type StepCtx = {
   paceMs: number;
   /** Current section (or Unassigned / flow) name for archive paths. */
   sectionName?: string;
+  signal?: AbortSignal;
 };
 
 async function executeStep(
@@ -340,12 +366,63 @@ async function executeStep(
   flow: FlowDocument,
   ctx: StepCtx
 ): Promise<void> {
+  if (ctx.signal?.aborted) throw new RunStoppedError();
   try {
     await executeStepBody(step, state, flow, ctx);
   } catch (err) {
-    if (stepIsOptional(step)) return;
+    if (stepIsOptional(step) && !(err instanceof RunStoppedError)) return;
     throw err;
   }
+}
+
+/**
+ * True when Stop came before the step finished.
+ * A step still running after the grace has its app closed, which also ends any wait inside it.
+ */
+async function stoppedDuring(
+  work: Promise<void>,
+  signal: AbortSignal | undefined,
+  closeApp: () => Promise<void>
+): Promise<boolean> {
+  if (!signal) return false;
+  const finished = work.then(
+    () => "finished" as const,
+    () => "finished" as const
+  );
+  const stop = whenAborted(signal);
+  try {
+    if ((await Promise.race([finished, stop.promise])) === "finished") return false;
+  } finally {
+    stop.dispose();
+  }
+  if ((await Promise.race([finished, after(STOP_GRACE_MS)])) === "finished") return false;
+  await closeApp();
+  return true;
+}
+
+function whenAborted(signal: AbortSignal): { promise: Promise<"stopped">; dispose: () => void } {
+  let dispose = () => {};
+  const promise = new Promise<"stopped">(resolve => {
+    if (signal.aborted) {
+      resolve("stopped");
+      return;
+    }
+    const onAbort = () => resolve("stopped");
+    signal.addEventListener("abort", onAbort, { once: true });
+    dispose = () => signal.removeEventListener("abort", onAbort);
+  });
+  return { promise, dispose };
+}
+
+function after(ms: number): Promise<"late"> {
+  return new Promise(resolve => setTimeout(() => resolve("late"), ms).unref());
+}
+
+async function closeRunApp(state: ExecState): Promise<void> {
+  const open = [state.driver, state.connecting].filter((item): item is AutomationDriver => item != null);
+  state.driver = null;
+  state.connecting = null;
+  await Promise.all(open.map(item => item.disconnect().catch(() => {})));
 }
 
 function announceOnPage(driver: AutomationDriver): boolean {
@@ -942,6 +1019,7 @@ function driverSessionOpen(driver: AutomationDriver): boolean {
 }
 
 async function ensureDriver(state: ExecState, flow: FlowDocument, ctx: StepCtx): Promise<void> {
+  if (ctx.signal?.aborted) throw new RunStoppedError();
   if (state.driver && !driverSessionOpen(state.driver)) {
     state.userDataDir = state.driver.profileDir?.() ?? state.userDataDir;
     await state.driver.disconnect().catch(() => {});
@@ -952,15 +1030,26 @@ async function ensureDriver(state: ExecState, flow: FlowDocument, ctx: StepCtx):
     return;
   }
   const driver = createDriver(ctx.driverKind);
-  await driver.connect({
-    appId: flow.appId,
-    locale: ctx.locale,
-    appPath: ctx.appPath,
-    pageUrl: ctx.pageUrl,
-    headless: ctx.headless,
-    screenshotDir: ctx.screenshotDir,
-    userDataDir: state.userDataDir
-  });
+  state.connecting = driver;
+  try {
+    await driver.connect({
+      appId: flow.appId,
+      locale: ctx.locale,
+      appPath: ctx.appPath,
+      pageUrl: ctx.pageUrl,
+      headless: ctx.headless,
+      screenshotDir: ctx.screenshotDir,
+      userDataDir: state.userDataDir,
+      signal: ctx.signal
+    });
+  } catch (err) {
+    if (state.connecting === driver) state.connecting = null;
+    await driver.disconnect().catch(() => {});
+    throw err;
+  }
+  // Stop closed this app while it was starting.
+  if (state.connecting !== driver) throw new RunStoppedError();
+  state.connecting = null;
   state.driver = driver;
   state.userDataDir = driver.profileDir?.() ?? state.userDataDir;
 }

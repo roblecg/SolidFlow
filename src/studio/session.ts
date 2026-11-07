@@ -93,8 +93,11 @@ export function sessionTarget(): "app" | null {
   return target;
 }
 
+let launching: AbortController | null = null;
+
 export function startSession(flowAppPath?: string, flowDriver?: DriverKind): Promise<void> {
   const ticket = ++sessionEpoch;
+  launching?.abort();
   return enqueueSession(() => openSession(ticket, flowAppPath, flowDriver));
 }
 
@@ -108,18 +111,23 @@ async function openSession(ticket: number, flowAppPath?: string, flowDriver?: Dr
     throw new Error("Set appPath in the flow to the exe you want to connect.");
   }
   const next = createDriver(inferDriver(flowDriver, appPath));
+  const abort = new AbortController();
+  launching = abort;
   try {
     await next.connect({
       appId: basename(appPath),
       locale: "en",
       appPath,
       headless: false,
-      screenshotDir
+      screenshotDir,
+      signal: abort.signal
     });
   } catch (err) {
     await next.disconnect().catch(() => {});
     if (ticket !== sessionEpoch) throw new SessionCancelledError();
     throw err;
+  } finally {
+    if (launching === abort) launching = null;
   }
   if (ticket !== sessionEpoch) {
     await next.disconnect().catch(() => {});
@@ -250,6 +258,7 @@ export async function setRecordingPaused(paused: boolean): Promise<void> {
 
 export function stopSession(): Promise<void> {
   const ticket = ++sessionEpoch;
+  launching?.abort();
   return enqueueSession(async () => {
     if (ticket !== sessionEpoch) return;
     await stopSessionNow();

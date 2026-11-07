@@ -679,7 +679,7 @@ function setRunButton(mode) {
 
 runBtn.onclick = async () => {
   if (testRunning) {
-    setStatus("Stopping after the current step…");
+    setStatus("Stopping…");
     try {
       await api("/api/run/stop", { method: "POST" });
     } catch (err) {
