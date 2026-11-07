@@ -436,7 +436,7 @@ namespace SolidFlow {
       foreach (IntPtr hwnd in popupHits) {
         if (!first) json.Append(',');
         first = false;
-        json.Append("{\"hwnd\":\"" + HwndText(hwnd) + "\",\"title\":" + JsonString(WindowTitle(hwnd)) + ",\"className\":" + JsonString(ClassNameOf(hwnd)) + BoundsJson(hwnd) + "}");
+        json.Append("{\"hwnd\":\"" + HwndText(hwnd) + "\",\"title\":" + JsonString(WindowTitle(hwnd)) + ",\"className\":" + JsonString(ClassNameOf(hwnd)) + BoundsJson(hwnd) + ClientJson(hwnd) + "}");
       }
       popupHits = null;
       json.Append("]}");
@@ -453,6 +453,12 @@ namespace SolidFlow {
       try { dpi = GetDpiForWindow(hwnd); } catch { dpi = 96; }
       if (dpi == 0) dpi = 96;
       return ",\"bounds\":{\"x\":" + win.Left + ",\"y\":" + win.Top + ",\"width\":" + width + ",\"height\":" + height + ",\"dpi\":" + dpi + "}";
+    }
+
+    static string ClientJson(IntPtr hwnd) {
+      int cw, ch;
+      if (IsIconic(hwnd) || !ClientPixels(hwnd, out cw, out ch)) return "";
+      return ",\"client\":{\"width\":" + cw + ",\"height\":" + ch + "}";
     }
 
     static bool IsPopup(IntPtr hwnd, IntPtr main, int procId, string appPath) {
@@ -1021,6 +1027,11 @@ namespace SolidFlow {
       if (IsSystemBrowser(hwnd)) {
         Bitmap screen = GrabBrowser(hwnd, imgW, imgH);
         if (screen != null) return screen;
+      } else if (CenterHits(hwnd)) {
+        // The pixels on screen are the window the user is looking at. PrintWindow stretches some WebView windows.
+        Bitmap screen = TryScreen(hwnd, imgW, imgH);
+        if (screen != null && !TitleBlank(screen, titleH)) return screen;
+        if (screen != null) screen.Dispose();
       }
       Bitmap full = TryPrint(hwnd, winW, winH, 2);
       Bitmap cropped = Crop(full, cropX, cropY, imgW, imgH);
@@ -1044,16 +1055,19 @@ namespace SolidFlow {
       return cropped;
     }
 
-    static Bitmap GrabBrowser(IntPtr hwnd, int imgW, int imgH) {
+    static bool CenterHits(IntPtr hwnd) {
       RECT ext;
-      if (DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out ext, Marshal.SizeOf(typeof(RECT))) != 0) return null;
-      int cx = ext.Left + Math.Max(1, (ext.Right - ext.Left) / 2);
-      int cy = ext.Top + Math.Max(1, (ext.Bottom - ext.Top) / 2);
+      if (DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out ext, Marshal.SizeOf(typeof(RECT))) != 0) return false;
       POINT point = new POINT();
-      point.X = cx;
-      point.Y = cy;
+      point.X = ext.Left + Math.Max(1, (ext.Right - ext.Left) / 2);
+      point.Y = ext.Top + Math.Max(1, (ext.Bottom - ext.Top) / 2);
       IntPtr hit = WindowFromPoint(point);
-      if (hit == IntPtr.Zero || GetAncestor(hit, 2) != GetAncestor(hwnd, 2)) return null;
+      if (hit == IntPtr.Zero) return false;
+      return GetAncestor(hit, 2) == GetAncestor(hwnd, 2);
+    }
+
+    static Bitmap GrabBrowser(IntPtr hwnd, int imgW, int imgH) {
+      if (!CenterHits(hwnd)) return null;
       return TryScreen(hwnd, imgW, imgH);
     }
 

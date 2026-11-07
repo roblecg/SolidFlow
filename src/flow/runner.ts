@@ -52,6 +52,39 @@ import {
 const activeAppLocks = new Set<string>();
 const FIELD_WAIT_MS = 20_000;
 const STOP_GRACE_MS = 2_000;
+const PAUSED_PREVIEW_MS = 1_500;
+
+/** Holds a run before its next step until it is resumed. */
+export class RunPause {
+  private paused = false;
+  private readonly resumers = new Set<() => void>();
+
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  set(paused: boolean): void {
+    this.paused = paused;
+    if (paused) return;
+    for (const resume of [...this.resumers]) resume();
+  }
+
+  /** Resolves on resume, on abort, or after `ms`, whichever comes first. */
+  wait(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!this.paused || signal?.aborted) return Promise.resolve();
+    return new Promise(resolve => {
+      const done = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", done);
+        this.resumers.delete(done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      signal?.addEventListener("abort", done, { once: true });
+      this.resumers.add(done);
+    });
+  }
+}
 
 type ExecState = {
   driver: AutomationDriver | null;
@@ -79,6 +112,10 @@ export type RunnerOptions = RunOptions & {
    * so it cannot keep clicking after the run reports stopped.
    */
   signal?: AbortSignal;
+  /** While paused, the run waits before its next step with the app left open. */
+  pause?: RunPause;
+  /** Called when the run starts and stops waiting on `pause`. */
+  onPause?: (paused: boolean) => void;
   onStep?: (event: {
     index: number;
     command: string;
@@ -179,9 +216,20 @@ async function runFlowOnce(
   const execSteps = normalized.steps;
   const flowSections = normalized.sections;
   const usesBrowser = execSteps.some(step => commandName(step) === "switchToBrowser");
+  const hold = async () => {
+    const pause = options.pause;
+    if (!pause?.isPaused || options.signal?.aborted) return;
+    options.onPause?.(true);
+    while (pause.isPaused && !options.signal?.aborted) {
+      await pause.wait(PAUSED_PREVIEW_MS, options.signal);
+      if (pause.isPaused && state.driver) await options.onPreview?.(state.driver).catch(() => {});
+    }
+    options.onPause?.(false);
+  };
 
   try {
     for (let i = 0; i < execSteps.length; i++) {
+      await hold();
       if (options.signal?.aborted) {
         status = "stopped";
         runError = new RunStoppedError();
@@ -229,7 +277,8 @@ async function runFlowOnce(
               flowPath,
               paceMs,
               sectionName,
-              signal: options.signal
+              signal: options.signal,
+              hold
             });
           })();
           if (await stoppedDuring(work, options.signal, () => closeRunApp(state))) {
@@ -358,6 +407,8 @@ type StepCtx = {
   /** Current section (or Unassigned / flow) name for archive paths. */
   sectionName?: string;
   signal?: AbortSignal;
+  /** Waits while the run is paused, so steps inside repeat or runFlow pause too. */
+  hold?: () => Promise<void>;
 };
 
 async function executeStep(
@@ -366,6 +417,7 @@ async function executeStep(
   flow: FlowDocument,
   ctx: StepCtx
 ): Promise<void> {
+  await ctx.hold?.();
   if (ctx.signal?.aborted) throw new RunStoppedError();
   try {
     await executeStepBody(step, state, flow, ctx);

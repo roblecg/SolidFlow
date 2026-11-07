@@ -47,6 +47,8 @@ export type TestRunLog = {
   startedAt: string;
   finishedAt?: string;
   status: "running" | "passed" | "failed" | "stopped";
+  /** Still running, holding before its next step. */
+  paused?: boolean;
   steps: TestStepLog[];
   sectionDefs: TestSectionDef[];
 };
@@ -126,7 +128,13 @@ export function finishTestRun(runId: string, status: "passed" | "failed" | "stop
   const run = testRuns.find(item => item.id === runId);
   if (!run) return;
   run.status = status;
+  run.paused = false;
   run.finishedAt = new Date().toISOString();
+}
+
+export function pauseTestRun(runId: string, paused: boolean): void {
+  const run = testRuns.find(item => item.id === runId);
+  if (run && run.status === "running") run.paused = paused;
 }
 
 function liveSections(run: TestRunLog): TestSectionLog[] {

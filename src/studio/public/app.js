@@ -656,7 +656,41 @@ document.getElementById("disconnect").onclick = async () => {
 document.getElementById("save").onclick = () => save().catch(err => setStatus(err.message, "bad"));
 
 let testRunning = false;
+let testPaused = false;
 const runBtn = document.getElementById("run");
+const pauseBtn = document.getElementById("pause");
+
+function setPauseButton(paused) {
+  testPaused = paused;
+  const label = paused ? "Resume" : "Pause";
+  pauseBtn.classList.toggle("is-paused", paused);
+  pauseBtn.querySelector(".pause-label").textContent = label;
+  pauseBtn.setAttribute("aria-label", label);
+  pauseBtn.title = paused ? "Continue the test from the next step" : "Hold the test before its next step";
+}
+
+pauseBtn.onclick = async () => {
+  if (!testRunning) return;
+  const paused = !testPaused;
+  setPauseButton(paused);
+  setStatus(paused ? "Pausing…" : "Running");
+  try {
+    await api("/api/run/pause", { method: "POST", body: JSON.stringify({ paused }) });
+  } catch {
+    setPauseButton(!paused);
+    setStatus("Failed", "bad");
+  }
+};
+
+async function refreshPauseStatus() {
+  if (!testPaused || statusEl.textContent !== "Pausing…") return;
+  try {
+    const live = await api("/api/run/live");
+    if (testPaused && live.status === "paused") setStatus("Paused");
+  } catch {
+    // The next poll checks again.
+  }
+}
 
 function setRunButton(mode) {
   if (mode === "stop") {
@@ -672,6 +706,7 @@ function setRunButton(mode) {
 
 runBtn.onclick = async () => {
   if (testRunning) {
+    pauseBtn.hidden = true;
     setStatus("Stopping…");
     try {
       await api("/api/run/stop", { method: "POST" });
@@ -690,6 +725,8 @@ runBtn.onclick = async () => {
   }
   testRunning = true;
   setRunButton("stop");
+  setPauseButton(false);
+  pauseBtn.hidden = false;
   setStatus("Running");
   showLogTab("test");
   window.clearInterval(poll);
@@ -698,6 +735,7 @@ runBtn.onclick = async () => {
   const liveTimer = window.setInterval(() => {
     void refreshLogs();
     void refreshRunPreview();
+    void refreshPauseStatus();
   }, 400);
   async function refreshRunPreview() {
     if (menu.hidden === false) return;
@@ -727,6 +765,8 @@ runBtn.onclick = async () => {
   } finally {
     testRunning = false;
     setRunButton("run");
+    pauseBtn.hidden = true;
+    setPauseButton(false);
     window.clearInterval(liveTimer);
     startPoll();
     void refreshLogs();
@@ -770,6 +810,7 @@ function statusMark(status) {
   if (status === "failed") return "✕";
   if (status === "running" || status === "stopping") return "…";
   if (status === "stopped") return "■";
+  if (status === "paused") return "‖";
   if (status === "skipped" || status === "pending") return "–";
   return "✓";
 }
@@ -802,9 +843,11 @@ function renderTestLogs(runs) {
     meta.className = "log-run-meta";
     const clock = document.createElement("span");
     clock.textContent = formatClock(run.startedAt);
+    const shown = run.paused ? "paused" : run.status;
     const mark = document.createElement("span");
-    mark.className = "mark " + run.status;
-    mark.textContent = statusMark(run.status);
+    mark.className = "mark " + shown;
+    mark.textContent = statusMark(shown);
+    mark.title = shown;
     const time = document.createElement("span");
     time.className = "log-time";
     time.textContent = run.status === "running" && !total ? "" : formatDuration(total);
@@ -846,6 +889,7 @@ function renderSectionLogs(runs) {
     runs.map(run => ({
       id: run.id,
       status: run.status,
+      paused: run.paused,
       sections: run.sections
     }))
   );
@@ -867,9 +911,11 @@ function renderSectionLogs(runs) {
     meta.className = "log-run-meta";
     const clock = document.createElement("span");
     clock.textContent = formatClock(run.startedAt);
+    const shown = run.paused ? "paused" : run.status;
     const mark = document.createElement("span");
-    mark.className = "mark " + run.status;
-    mark.textContent = statusMark(run.status);
+    mark.className = "mark " + shown;
+    mark.textContent = statusMark(shown);
+    mark.title = shown;
     meta.append(clock, mark);
     block.append(title, meta);
 

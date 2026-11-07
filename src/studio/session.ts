@@ -18,9 +18,11 @@ import {
   listNamedTrayMenu,
   listTrayApps as readTrayApps,
   listTrayMenuItems,
+  clientIsBlank,
   pagePixelHint,
-  popupMatchingTitle,
   presentFrame,
+  shapeFits,
+  windowForPage,
   type FrameLayout,
   type NativeApp,
   type Rect
@@ -485,15 +487,16 @@ async function pumpFrames(): Promise<void> {
   }
 }
 
-/** When the current page is a popup, capture that window. Otherwise keep the main window. */
+/** When no window is pinned, capture the window that has this page's shape, not a wider one. */
 async function previewWindow(
   native: NativeApp | null,
-  page: import("playwright-core").Page
+  page: import("playwright-core").Page,
+  hint: { width: number; height: number } | undefined
 ): Promise<NativeApp | null> {
   if (!native || native.hwnd) return native;
   const title = await page.title().catch(() => "");
   const windows = await listNativePopups(native).catch(() => []);
-  const popup = popupMatchingTitle(windows, title);
+  const popup = windowForPage(windows, { width: hint?.width ?? 0, height: hint?.height ?? 0, title });
   if (!popup) return native;
   return { ...native, hwnd: popup.hwnd };
 }
@@ -519,16 +522,29 @@ async function frameOf(
   await clearCommandLabel(page);
   const hint = await pagePixelHint(page);
   // The connected app from the flow's appPath, not the SolidFlow studio window.
-  const native = await previewWindow(automation.nativeApp(), page);
-  const browserWindow = isSystemBrowserApp(native?.appPath);
+  const app = automation.nativeApp();
+  const browserWindow = isSystemBrowserApp(app?.appPath);
   const webWindow = automation.webWindowFocused();
-  const captured = native ? await captureNativeFrame(native, browserWindow ? undefined : hint).catch(() => null) : null;
-  let frame = captured;
-  if (frame?.popup && webWindow) frame = { ...frame, popup: false };
-  const nativeView = Boolean(frame && (frame.popup || browserWindow));
-  const hierarchy = nativeView ? null : await captureHierarchy(page).catch(() => null);
+  // waitForPopup on a folder picker pins that dialog. Its page is still the previous one.
+  const nativeDialog = Boolean(app?.hwnd && !webWindow && !browserWindow);
+  const native = browserWindow || nativeDialog ? app : await previewWindow(app, page, hint);
+  const frame = native
+    ? await captureNativeFrame(native, browserWindow ? undefined : hint).catch(() => null)
+    : null;
+  // DO NOT "fix" the Customer Portal preview by scaling the page to fill the captured window.
+  // The EDC login is a narrower window than the main app. Painting its screenshot into that wider
+  // client (blit scales x and y independently) stretches the logo, fields, and Sign in button.
+  // Letterboxing the page on top of the wider window was also rejected: the portal sat in the
+  // middle with the other page showing through the sides. Showing only a blank WebView capture
+  // hid the portal after waitForPopup. Keep this order: a folder picker or browser is the captured
+  // window; a web window is shown from its own pixels when those pixels are this page; the page is
+  // painted into the client only when shapeFits; otherwise the page screenshot is used at its own
+  // aspect. Do not drop windowForPage, shapeFits, or pageFits, and do not set .stage img to
+  // height: 100% — the stage must follow the image's own aspect (--stage-ratio).
+  const windowImage = Boolean(frame && (browserWindow || nativeDialog));
+  const hierarchy = windowImage ? null : await captureHierarchy(page).catch(() => null);
   let buffer: Buffer | null = null;
-  if (!nativeView && !browserWindow) {
+  if (!windowImage) {
     try {
       buffer = await page.screenshot({ type: "png", timeout: 4_000 });
     } catch {
@@ -537,30 +553,39 @@ async function frameOf(
   }
   let image = buffer ?? Buffer.alloc(0);
   let layout: FrameLayout | null = null;
-  if (nativeView && frame) {
+  const pagePixels = buffer ? pngSize(buffer) : null;
+  const pageFits = Boolean(frame && pagePixels && frame.client.y >= 8 && shapeFits(frame.client, pagePixels));
+  const nativeShowsPage = Boolean(frame && frame.client.y >= 8 && !clientIsBlank(frame.png, frame.client));
+  // Use the window's own pixels when they are this page. Never scale the page into a differently shaped window.
+  const showWindow = Boolean(frame && (windowImage || (nativeShowsPage && (frame.popup || pageFits))));
+  if (showWindow && frame) {
     try {
       image = presentFrame(frame.png);
     } catch {
       image = frame.png;
     }
-    layout = frame;
-  } else if (frame && buffer && frame.client.y >= 8) {
+    layout = windowImage || !buffer ? frame : { ...frame, popup: false };
+  } else if (frame && buffer && pageFits) {
     try {
       image = compositePageIntoFrame(frame.png, buffer, frame.client);
-      layout = frame;
+      layout = { ...frame, popup: false };
     } catch {
       image = buffer;
       layout = null;
     }
+  } else if (buffer) {
+    image = buffer;
+    layout = null;
   }
   lastLayout = layout;
   const cssW = hint?.cssWidth || 1;
   const cssH = hint?.cssHeight || 1;
   const pageSize = buffer ? pngSize(buffer) : { width: frame?.width ?? 1, height: frame?.height ?? 1 };
-  const scaleX = layout && !layout.popup ? layout.client.width / cssW : pageSize.width / cssW;
-  const scaleY = layout && !layout.popup ? layout.client.height / cssH : pageSize.height / cssH;
+  const placed = Boolean(layout && buffer && !layout.popup);
+  const scaleX = placed ? layout!.client.width / cssW : pageSize.width / cssW;
+  const scaleY = placed ? layout!.client.height / cssH : pageSize.height / cssH;
   const nodes =
-    hierarchy && !layout?.popup
+    hierarchy && placed
       ? flatten(hierarchy, scaleX, scaleY, layout?.client.x ?? 0, layout?.client.y ?? 0, layout?.client ?? null)
       : [];
   if (layout) {

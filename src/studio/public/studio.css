@@ -268,6 +268,7 @@ html[data-edge="top-right"], html[data-edge="bottom-left"] { cursor: nesw-resize
   padding: 0 12px;
   border-bottom: 1px solid var(--line);
   overflow: hidden;
+  container-type: inline-size;
 }
 .log-tab {
   flex: 0 0 auto;
@@ -446,6 +447,8 @@ html[data-edge="top-right"], html[data-edge="bottom-left"] { cursor: nesw-resize
   min-width: 0;
   min-height: 0;
 }
+/* DO NOT set height: 100% or object-fit: fill. That stretches the Customer Portal preview.
+   The stage aspect is the captured image (--stage-ratio). See frameOf in session.ts. */
 .stage img {
   display: block;
   width: 100%;
@@ -665,6 +668,7 @@ html[data-edge="top-right"], html[data-edge="bottom-left"] { cursor: nesw-resize
 }
 .btn-stop:hover { background: #b42318; }
 .log-run-meta .stopped { color: #b54708; }
+.log-run-meta .paused { color: var(--muted); }
 
 .menu, .flyout {
   position: fixed;
@@ -856,7 +860,32 @@ body.picking .app {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#run { flex: 0 0 auto; white-space: nowrap; }
+#run, #pause { flex: 0 0 auto; white-space: nowrap; }
+#pause {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 6rem;
+}
+.pause-icon {
+  width: 10px;
+  height: 11px;
+  box-sizing: border-box;
+  border-left: 3px solid currentColor;
+  border-right: 3px solid currentColor;
+}
+#pause.is-paused .pause-icon {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 6px 0 6px 10px;
+  border-color: transparent transparent transparent currentColor;
+}
+@container (max-width: 640px) {
+  #pause { min-width: 0; padding-inline: 12px; }
+  .pause-label { display: none; }
+}
 .status.ok { color: var(--ok); }
 .status.bad { color: var(--bad); }
 .log {

@@ -37,7 +37,16 @@ export type NativeFrame = FrameLayout & { png: Buffer };
 
 export type NativeApp = { pid: number; appPath: string; hwnd?: string };
 
-export type NativePopup = { hwnd: string; title: string; className?: string; bounds?: ScreenBounds };
+export type NativePopup = {
+  hwnd: string;
+  title: string;
+  className?: string;
+  bounds?: ScreenBounds;
+  /** Client area in physical pixels, the size a page in that window fills. */
+  client?: Size;
+};
+
+type Size = { width: number; height: number };
 
 export type PixelHint = { width: number; height: number; cssWidth: number; cssHeight: number };
 
@@ -124,6 +133,92 @@ export function popupMatchingTitle(windows: NativePopup[], title: string): Nativ
   const wanted = title.trim();
   if (!wanted) return null;
   return windows.find(window => window.title.trim() === wanted) ?? null;
+}
+
+/** A page of `page` pixels fills this client area. */
+export function sizeFits(client: Size, page: Size): boolean {
+  return near(client.width, page.width) && near(client.height, page.height);
+}
+
+/** Drawing a page of `page` pixels into this client area keeps its proportions. Unknown sizes count as a fit. */
+export function shapeFits(client: Size, page: Size): boolean {
+  if (client.width <= 0 || client.height <= 0 || page.width <= 0 || page.height <= 0) return true;
+  const height = (page.height * client.width) / page.width;
+  return Math.abs(height - client.height) <= Math.max(24, client.height / 12);
+}
+
+/** The one popup whose client area fits the page. The page title breaks a tie between same-size popups. */
+export function popupFittingPage(
+  windows: NativePopup[],
+  page: Size & { title: string },
+  skip?: string
+): NativePopup | null {
+  const fits = windows.filter(
+    window => window.hwnd !== skip && !isClassicDialog(window) && window.client && sizeFits(window.client, page)
+  );
+  if (fits.length === 1) return fits[0]!;
+  return popupMatchingTitle(fits, page.title);
+}
+
+/**
+ * The window that is showing this page.
+ * A wider window with the same title is not a match: painting the page into it stretches the preview.
+ */
+export function windowForPage(windows: NativePopup[], page: Size & { title: string }): NativePopup | null {
+  if (page.width <= 0 || page.height <= 0) return popupMatchingTitle(windows, page.title);
+  const sized = popupFittingPage(windows, page);
+  if (sized) return sized;
+  const shaped = windows.filter(
+    window => window.client && !isClassicDialog(window) && shapeFits(window.client, page)
+  );
+  if (shaped.length === 1) return shaped[0]!;
+  const shapedTitle = popupMatchingTitle(shaped, page.title);
+  if (shapedTitle) return shapedTitle;
+  const titled = popupMatchingTitle(windows, page.title);
+  if (titled && !titled.client) return titled;
+  return null;
+}
+
+/** True when the captured client has no real page pixels, so PrintWindow left a blank WebView. */
+export function clientIsBlank(framePng: Buffer, client: Rect): boolean {
+  let frame: PNG;
+  try {
+    frame = PNG.sync.read(framePng);
+  } catch {
+    return true;
+  }
+  const x0 = Math.max(0, Math.floor(client.x));
+  const y0 = Math.max(0, Math.floor(client.y));
+  const x1 = Math.min(frame.width, Math.floor(client.x + client.width));
+  const y1 = Math.min(frame.height, Math.floor(client.y + client.height));
+  if (x1 - x0 < 8 || y1 - y0 < 8) return true;
+  const stepX = Math.max(1, Math.floor((x1 - x0) / 8));
+  const stepY = Math.max(1, Math.floor((y1 - y0) / 8));
+  let sum = 0;
+  let sum2 = 0;
+  let n = 0;
+  for (let y = y0; y < y1; y += stepY) {
+    for (let x = x0; x < x1; x += stepX) {
+      const i = (y * frame.width + x) * 4;
+      const alpha = frame.data[i + 3] ?? 0;
+      const lum =
+        alpha < 16
+          ? 0
+          : ((frame.data[i] ?? 0) + (frame.data[i + 1] ?? 0) + (frame.data[i + 2] ?? 0)) / 3;
+      sum += lum;
+      sum2 += lum * lum;
+      n += 1;
+    }
+  }
+  if (n < 4) return true;
+  const mean = sum / n;
+  const variance = sum2 / n - mean * mean;
+  return variance < 12;
+}
+
+function near(actual: number, expected: number): boolean {
+  if (actual <= 0 || expected <= 0) return false;
+  return Math.abs(actual - expected) <= Math.max(24, expected / 8);
 }
 
 export function imageToPage(
@@ -251,13 +346,22 @@ export async function listNativePopups(app: NativeApp): Promise<NativePopup[]> {
     .filter(window => typeof window.hwnd === "string" && window.hwnd && typeof window.title === "string")
     .map(window => {
       const bounds = finiteBounds(window.bounds);
+      const client = finiteSize(window.client);
       return {
         hwnd: window.hwnd as string,
         title: window.title as string,
         ...(typeof window.className === "string" && window.className ? { className: window.className } : {}),
-        ...(bounds ? { bounds } : {})
+        ...(bounds ? { bounds } : {}),
+        ...(client ? { client } : {})
       };
     });
+}
+
+function finiteSize(value: { width?: number; height?: number } | undefined): Size | undefined {
+  const width = Number(value?.width);
+  const height = Number(value?.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) return undefined;
+  return { width, height };
 }
 
 function finiteBounds(value: { x?: number; y?: number; width?: number; height?: number; dpi?: number } | undefined): ScreenBounds | undefined {
@@ -558,6 +662,7 @@ type HelperResponse = {
     title?: string;
     className?: string;
     bounds?: { x?: number; y?: number; width?: number; height?: number; dpi?: number };
+    client?: { width?: number; height?: number };
   }[];
   controls?: { name?: string; kind?: string; bounds?: Rect }[];
 };

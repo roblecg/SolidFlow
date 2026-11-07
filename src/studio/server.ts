@@ -12,13 +12,14 @@ import {
   finishTestRun,
   listAppLogs,
   listTestRuns,
-  noteTestStep
+  noteTestStep,
+  pauseTestRun
 } from "./logs.js";
 import { resolveAppPath } from "../config.js";
 import { listCommands } from "../flow/commands.js";
 import { describeFormatIssue, formatFlowContent, formatFlowDocument } from "../flow/format.js";
 import { parseFlowContent, parseFlowFile } from "../flow/parser.js";
-import { runFlowFile, type DriverSlot } from "../flow/runner.js";
+import { RunPause, runFlowFile, type DriverSlot } from "../flow/runner.js";
 import type { FlowSection } from "../types.js";
 import {
   createWorkspaceDir,
@@ -68,6 +69,7 @@ type LiveRun = {
 
 const liveRun: LiveRun = { running: false, command: "", status: "idle", log: [] };
 let runAbort: AbortController | null = null;
+let runPause: RunPause | null = null;
 
 const PUBLIC_DIR = join(packageRoot(), "src/studio/public");
 
@@ -248,6 +250,19 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     sendJson(res, 200, { ok: true, stopped: true });
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/run/pause") {
+    const body = await readBody<{ paused?: boolean }>(req);
+    if (!liveRun.running || !runPause || runAbort?.signal.aborted) {
+      sendJson(res, 200, { ok: true, paused: false });
+      return;
+    }
+    const paused = body.paused !== false;
+    runPause.set(paused);
+    if (paused && liveRun.status !== "paused") liveRun.status = "pausing";
+    appLog("info", paused ? "Pause requested — holding before the next step" : "Resume requested");
+    sendJson(res, 200, { ok: true, paused });
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/run") {
     if (rejectWithoutWorkspace(res)) return;
     if (liveRun.running) {
@@ -271,6 +286,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     await setRecordingPaused(true);
     const abort = new AbortController();
     runAbort = abort;
+    const pause = new RunPause();
+    runPause = pause;
     liveRun.running = true;
     liveRun.log = [];
     liveRun.status = "running";
@@ -312,6 +329,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         keepDriver: true,
         driverSlot: slot,
         signal: abort.signal,
+        pause,
+        onPause: paused => {
+          if (!abort.signal.aborted) liveRun.status = paused ? "paused" : "running";
+          pauseTestRun(runId, paused);
+          appLog("info", paused ? `Run paused: ${body.path}` : `Run resumed: ${body.path}`);
+        },
         onStep: event => {
           liveRun.command = event.command;
           liveRun.status = event.status;
@@ -348,6 +371,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     } finally {
       liveRun.running = false;
       runAbort = null;
+      runPause = null;
       if (borrowed) await settleBorrowedDriver(borrowedStamp, slot.current);
       clearRunPreview();
       await setRecordingPaused(false);
