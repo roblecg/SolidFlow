@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { runFlowFile } from "../src/flow/runner.js";
+import { runFlowDocument, runFlowFile, type DriverSlot } from "../src/flow/runner.js";
 import { parseFlowContent, parseFlowFile } from "../src/flow/parser.js";
 import { packageRoot } from "../src/util/paths.js";
 
@@ -77,6 +77,36 @@ describe("local page flow", () => {
       expect(json.steps.length).toBe(report.steps.length);
       expect(report.reportDir.replace(/\\/g, "/")).toMatch(/\/\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_page-smoke$/);
     } finally {
+      rmSync(reportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not cover the page with the command name", async () => {
+    const reportDir = mkdtempSync(join(tmpdir(), "solidflow-results-"));
+    const slot: DriverSlot = { current: null };
+    const flow = parseFlowContent(`appId: page.demo
+driver: chromium
+---
+- launchApp
+- tapOn: "Continue"
+`);
+    try {
+      const report = await runFlowDocument(flow, {
+        reportDir,
+        headless: true,
+        cwd: pagesDir,
+        pageUrl: loginUrl,
+        paceMs: 700,
+        keepDriver: true,
+        driverSlot: slot
+      });
+      expect(report.status).toBe("passed");
+      const label = await slot.current!.getPage().evaluate(
+        `document.getElementById("__solidFlow_step") ? "present" : "gone"`
+      );
+      expect(label).toBe("gone");
+    } finally {
+      await slot.current?.disconnect();
       rmSync(reportDir, { recursive: true, force: true });
     }
   });

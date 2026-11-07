@@ -509,13 +509,13 @@ async function executeStepBody(
       state.driver = null;
     }
     await ensureDriver(state, flow, ctx);
-    if (state.driver) await focusAndAnnounce(state.driver, "launchApp", ctx.paceMs);
+    if (state.driver) await focusAndAnnounce(state.driver);
     return;
   }
 
   if (desktopCommandNeedsPage(name) || name === "killApp" || name === "evalScript" || name === "assertTrue" || name === "runScript") {
     if (desktopCommandNeedsPage(name) && !state.driver) await ensureDriver(state, flow, ctx);
-    if (state.driver) await focusAndAnnounce(state.driver, name, ctx.paceMs);
+    if (state.driver) await focusAndAnnounce(state.driver);
     const page = state.driver?.getPage();
     if (desktopCommandNeedsPage(name) && !page) throw new FlowError(`${name} requires a connected app`);
     await executeDesktopCommand(name, parsed.kind === "simple" ? undefined : parsed.value, {
@@ -549,7 +549,7 @@ async function executeStepBody(
     } else {
       await driver.waitForPopup(popupTimeout(parsed.kind === "simple" ? undefined : parsed.value));
     }
-    if (announceOnPage(driver)) await focusAndAnnounce(driver, name, ctx.paceMs);
+    if (announceOnPage(driver)) await focusAndAnnounce(driver);
     return;
   }
 
@@ -685,7 +685,7 @@ async function executeStepBody(
 
   if (name === "executeScript") {
     if (!state.driver) await ensureDriver(state, flow, ctx);
-    await focusAndAnnounce(state.driver!, "executeScript", ctx.paceMs);
+    await focusAndAnnounce(state.driver!);
     const script = String(parsed.kind === "kv" ? parsed.value : "");
     await state.driver!.getPage().evaluate(`(0, eval)(${JSON.stringify(script)})`);
     return;
@@ -728,7 +728,7 @@ async function executeStepBody(
   if (!state.driver) await ensureDriver(state, flow, ctx);
   const driver = state.driver!;
   const page = driver.getPage();
-  if (announceOnPage(driver)) await focusAndAnnounce(driver, name, ctx.paceMs);
+  if (announceOnPage(driver)) await focusAndAnnounce(driver);
 
   const strVal = (v: unknown) => interpolateEnv(String(v), state.env);
 
@@ -953,25 +953,10 @@ async function executeStepBody(
   }
 }
 
-async function focusAndAnnounce(
-  driver: AutomationDriver,
-  command: string,
-  paceMs: number
-): Promise<void> {
+async function focusAndAnnounce(driver: AutomationDriver): Promise<void> {
   const page = driver.getPage();
   await page.bringToFront().catch(() => {});
-  if (!paceMs) return;
-  const banner = `(() => {
-    let bar = document.getElementById("__solidFlow_step");
-    if (!bar) {
-      bar = document.createElement("div");
-      bar.id = "__solidFlow_step";
-      bar.style.cssText = "position:fixed;left:16px;bottom:16px;z-index:2147483647;background:#1c2330;color:#fff;padding:10px 14px;border-radius:8px;font:600 14px Segoe UI,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.25)";
-      document.documentElement.appendChild(bar);
-    }
-    bar.textContent = ${JSON.stringify(command)};
-  })()`;
-  await page.evaluate(banner).catch(() => {});
+  await page.evaluate(`document.getElementById("__solidFlow_step")?.remove()`).catch(() => {});
 }
 
 async function presentTarget(

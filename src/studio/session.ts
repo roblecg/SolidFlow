@@ -202,6 +202,7 @@ export function chooseSelector(input: {
 
 export async function pickAt(nx: number, ny: number): Promise<StudioNode | null> {
   if (!driver) return null;
+  await clearCommandLabel(driver.getPage());
   const xNorm = Math.min(1, Math.max(0, nx));
   const yNorm = Math.min(1, Math.max(0, ny));
   const page = driver.getPage();
@@ -497,6 +498,14 @@ async function previewWindow(
   return { ...native, hwnd: popup.hwnd };
 }
 
+/** The run used to pin the command name over the page. Take it off so it cannot cover a control. */
+function clearCommandLabel(page: import("playwright-core").Page): Promise<void> {
+  return page.evaluate(`document.getElementById("__solidFlow_step")?.remove()`).then(
+    () => undefined,
+    () => undefined
+  );
+}
+
 function isSystemBrowserApp(appPath: string | undefined): boolean {
   const name = appPath?.split(/[/\\]/).pop()?.toLowerCase() ?? "";
   return name === "msedge.exe" || name === "chrome.exe" || name === "firefox.exe" || name === "brave.exe" || name === "opera.exe";
@@ -507,6 +516,7 @@ async function frameOf(
   sessionTarget: "app"
 ): Promise<StudioSnapshot> {
   const page = automation.getPage();
+  await clearCommandLabel(page);
   const hint = await pagePixelHint(page);
   // The connected app from the flow's appPath, not the SolidFlow studio window.
   const native = await previewWindow(automation.nativeApp(), page);
