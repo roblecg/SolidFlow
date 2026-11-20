@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { runFlowFile } from "../src/flow/runner.js";
+import { runFlowDocument, runFlowFile, type DriverSlot } from "../src/flow/runner.js";
 import { parseFlowContent, parseFlowFile } from "../src/flow/parser.js";
 import { packageRoot } from "../src/util/paths.js";
 
@@ -81,6 +81,36 @@ describe("local page flow", () => {
     }
   });
 
+  it("does not cover the page with the command name", async () => {
+    const reportDir = mkdtempSync(join(tmpdir(), "solidflow-results-"));
+    const slot: DriverSlot = { current: null };
+    const flow = parseFlowContent(`appId: page.demo
+driver: chromium
+---
+- launchApp
+- tapOn: "Continue"
+`);
+    try {
+      const report = await runFlowDocument(flow, {
+        reportDir,
+        headless: true,
+        cwd: pagesDir,
+        pageUrl: loginUrl,
+        paceMs: 700,
+        keepDriver: true,
+        driverSlot: slot
+      });
+      expect(report.status).toBe("passed");
+      const label = await slot.current!.getPage().evaluate(
+        `document.getElementById("__solidFlow_step") ? "present" : "gone"`
+      );
+      expect(label).toBe("gone");
+    } finally {
+      await slot.current?.disconnect();
+      rmSync(reportDir, { recursive: true, force: true });
+    }
+  });
+
   it("runs the maestro command coverage flow", async () => {
     const reportDir = mkdtempSync(join(tmpdir(), "solidflow-results-"));
     try {
@@ -89,6 +119,36 @@ describe("local page flow", () => {
         headless: true,
         cwd: pagesDir,
         pageUrl: loginUrl
+      });
+      expect(report.status).toBe("passed");
+    } finally {
+      rmSync(reportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("switches among windows that are already open and still returns to the original page", async () => {
+    const reportDir = mkdtempSync(join(tmpdir(), "solidflow-results-"));
+    try {
+      const report = await runFlowFile(join(pagesDir, "windows.yaml"), {
+        reportDir,
+        headless: true,
+        cwd: pagesDir,
+        pageUrl: pathToFileURL(join(pagesDir, "windows-host.html")).href
+      });
+      expect(report.status).toBe("passed");
+    } finally {
+      rmSync(reportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lets waitForPopup follow the window that switchToWindow did not select", async () => {
+    const reportDir = mkdtempSync(join(tmpdir(), "solidflow-results-"));
+    try {
+      const report = await runFlowFile(join(pagesDir, "windows-next.yaml"), {
+        reportDir,
+        headless: true,
+        cwd: pagesDir,
+        pageUrl: pathToFileURL(join(pagesDir, "windows-host.html")).href
       });
       expect(report.status).toBe("passed");
     } finally {

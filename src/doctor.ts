@@ -5,6 +5,7 @@ import { execSync } from "node:child_process";
 import { parseFlowFile } from "./flow/parser.js";
 import { validateFlowMeta } from "./flow/validate.js";
 import { loadConfigFromAncestors, resolveAppPath } from "./config.js";
+import { isElectronApp, isKcpsDesktop } from "./driver/electron-app.js";
 import { packageRoot } from "./util/paths.js";
 
 export type DoctorResult = {
@@ -87,6 +88,10 @@ export async function runDoctor(flowPath?: string): Promise<DoctorResult> {
       if (flow.appPath) {
         if (existsSync(flow.appPath)) {
           messages.push(`OK flow appPath: ${flow.appPath}`);
+          if (isElectronApp(flow.appPath)) {
+            messages.push(`OK Electron desktop app: ${flow.appPath}`);
+            if (isKcpsDesktop(flow.appPath)) messages.push(await kcpsServiceMessage());
+          }
         } else {
           ok = false;
           messages.push(`FAIL flow appPath not found: ${flow.appPath}`);
@@ -105,4 +110,16 @@ export async function runDoctor(flowPath?: string): Promise<DoctorResult> {
   }
 
   return { ok, messages };
+}
+
+async function kcpsServiceMessage(): Promise<string> {
+  try {
+    const res = await fetch("http://127.0.0.1:5570/api/app/info", { signal: AbortSignal.timeout(1500) });
+    if (res.ok) {
+      return "OK StatusMonitorSvc is listening on 127.0.0.1:5570";
+    }
+  } catch {
+    // connection refused or timeout
+  }
+  return "WARN StatusMonitorSvc is not listening on 127.0.0.1:5570. The Cloud Print and Scan window waits for that service.";
 }

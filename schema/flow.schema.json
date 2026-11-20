@@ -19,7 +19,7 @@
     },
     "driver": {
       "type": "string",
-      "enum": ["webview2", "chromium", "android", "ios", "browser"]
+      "enum": ["webview2", "chromium", "electron", "android", "ios", "browser"]
     },
     "steps": {
       "type": "array",

@@ -87,8 +87,9 @@
           <button id="tab-sections" class="log-tab" type="button">Sections</button>
           <button id="tab-app" class="log-tab" type="button">App logs</button>
           <span id="status" class="status muted"></span>
-          <span class="spacer"></span>
-          <button id="run" class="btn btn-primary" type="button">Run test</button>
+        <span class="spacer"></span>
+        <button id="pause" class="btn" type="button" hidden aria-label="Pause"><span class="pause-icon" aria-hidden="true"></span><span class="pause-label">Pause</span></button>
+        <button id="run" class="btn btn-primary" type="button">Run test</button>
         </div>
         <div id="test-logs" class="log-body"></div>
         <div id="section-logs" class="log-body" hidden></div>
@@ -116,6 +117,7 @@
       </div>
     </div>
     <div id="menu" class="menu" hidden></div>
+    <div id="window-suggest" class="menu window-suggest" hidden role="listbox" aria-label="Open windows"></div>
     <div id="file-menu" class="menu file-menu" hidden>
       <button type="button" data-action="file">New File <kbd>Ctrl+N</kbd></button>
       <button type="button" data-action="folder">New Folder</button>
@@ -124,6 +126,7 @@
     </div>
     <script src="/inspect-hit.js"></script>
     <script src="/command-menu.js"></script>
+    <script src="/window-suggest.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

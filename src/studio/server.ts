@@ -12,13 +12,14 @@ import {
   finishTestRun,
   listAppLogs,
   listTestRuns,
-  noteTestStep
+  noteTestStep,
+  pauseTestRun
 } from "./logs.js";
 import { resolveAppPath } from "../config.js";
 import { listCommands } from "../flow/commands.js";
 import { describeFormatIssue, formatFlowContent, formatFlowDocument } from "../flow/format.js";
 import { parseFlowContent, parseFlowFile } from "../flow/parser.js";
-import { runFlowFile, type DriverSlot } from "../flow/runner.js";
+import { RunPause, runFlowFile, type DriverSlot } from "../flow/runner.js";
 import type { FlowSection } from "../types.js";
 import {
   createWorkspaceDir,
@@ -39,16 +40,22 @@ import {
   workspaceStatus
 } from "./workspace.js";
 import {
-  adoptDriver,
   borrowDriver,
+  sessionStamp,
+  settleBorrowedDriver,
   clearRunPreview,
   drainRecordedLines,
   pickAt,
   publishRunPreview,
   setRecordingPaused,
   snapshot,
+  SessionCancelledError,
+  listSwitchWindows,
+  listTrayApps,
+  listTrayMenu,
   startSession,
-  stopSession
+  stopSession,
+  whenSessionIdle
 } from "./session.js";
 
 const STUDIO_PACE_MS = 700;
@@ -62,6 +69,7 @@ type LiveRun = {
 
 const liveRun: LiveRun = { running: false, command: "", status: "idle", log: [] };
 let runAbort: AbortController | null = null;
+let runPause: RunPause | null = null;
 
 const PUBLIC_DIR = join(packageRoot(), "src/studio/public");
 
@@ -109,6 +117,7 @@ export async function startStudio(port = 4317, options: { openBrowser?: boolean 
 
   await new Promise<void>(resolve => {
     const shutdown = () => {
+      runAbort?.abort();
       void stopSession().finally(() => {
         server.close(() => resolve());
       });
@@ -237,8 +246,21 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     runAbort.abort();
     liveRun.command = "Stopping…";
     liveRun.status = "stopping";
-    appLog("info", "Stop requested — finishing the current step, then ending the run");
+    appLog("info", "Stop requested — ending the run");
     sendJson(res, 200, { ok: true, stopped: true });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/run/pause") {
+    const body = await readBody<{ paused?: boolean }>(req);
+    if (!liveRun.running || !runPause || runAbort?.signal.aborted) {
+      sendJson(res, 200, { ok: true, paused: false });
+      return;
+    }
+    const paused = body.paused !== false;
+    runPause.set(paused);
+    if (paused && liveRun.status !== "paused") liveRun.status = "pausing";
+    appLog("info", paused ? "Pause requested — holding before the next step" : "Resume requested");
+    sendJson(res, 200, { ok: true, paused });
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/run") {
@@ -262,14 +284,18 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       await writeFlow(body.path, content);
     }
     await setRecordingPaused(true);
-    const slot: DriverSlot = { current: borrowDriver() };
-    const config = workspaceConfig();
     const abort = new AbortController();
     runAbort = abort;
+    const pause = new RunPause();
+    runPause = pause;
     liveRun.running = true;
     liveRun.log = [];
     liveRun.status = "running";
     liveRun.command = "Starting…";
+    const slot: DriverSlot = { current: null };
+    let borrowed = false;
+    let borrowedStamp = 0;
+    const config = workspaceConfig();
     const runId = newRunId();
     const fileName = body.path.split("/").pop()?.replace(/\.ya?ml$/i, "") ?? body.path;
     let flowName = fileName;
@@ -284,6 +310,17 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     beginTestRun(runId, flowName, body.path, flowSections);
     appLog("info", `Run started: ${body.path}`);
     try {
+      await whenSessionIdle();
+      if (abort.signal.aborted) {
+        finishTestRun(runId, "stopped");
+        appLog("warn", `Run stopped: ${body.path}`);
+        liveRun.status = "stopped";
+        sendJson(res, 200, { status: "stopped", steps: [], sections: [] });
+        return;
+      }
+      borrowedStamp = sessionStamp();
+      slot.current = borrowDriver();
+      borrowed = true;
       const report = await runFlowFile(resolveFlowPath(body.path), {
         reportDir: reportRoot(),
         cwd: workspaceRoot(),
@@ -292,6 +329,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         keepDriver: true,
         driverSlot: slot,
         signal: abort.signal,
+        pause,
+        onPause: paused => {
+          if (!abort.signal.aborted) liveRun.status = paused ? "paused" : "running";
+          pauseTestRun(runId, paused);
+          appLog("info", paused ? `Run paused: ${body.path}` : `Run resumed: ${body.path}`);
+        },
         onStep: event => {
           liveRun.command = event.command;
           liveRun.status = event.status;
@@ -328,7 +371,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     } finally {
       liveRun.running = false;
       runAbort = null;
-      adoptDriver(slot.current);
+      runPause = null;
+      if (borrowed) await settleBorrowedDriver(borrowedStamp, slot.current);
       clearRunPreview();
       await setRecordingPaused(false);
     }
@@ -390,8 +434,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       sendJson(res, 400, { error: "Open a flow and set appPath to the exe you want to connect." });
       return;
     }
-    const flowAppPath = parseFlowContent(body.content, body.path || "flow").appPath;
-    await startSession(flowAppPath);
+    const flow = parseFlowContent(body.content, body.path || "flow");
+    try {
+      await startSession(flow.appPath, flow.driver);
+    } catch (err) {
+      if (err instanceof SessionCancelledError) {
+        sendJson(res, 200, { cancelled: true, ...(await snapshot()) });
+        return;
+      }
+      throw err;
+    }
     appLog("info", "Connected app session");
     sendJson(res, 200, await snapshot());
     return;
@@ -400,6 +452,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     await stopSession();
     appLog("info", "Disconnected device session");
     sendJson(res, 200, { connected: false, target: null, nodes: [] });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/windows") {
+    sendJson(res, 200, await listSwitchWindows());
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/tray") {
+    if (url.searchParams.has("app")) sendJson(res, 200, await listTrayMenu(url.searchParams.get("app") ?? ""));
+    else sendJson(res, 200, await listTrayApps());
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/session") {

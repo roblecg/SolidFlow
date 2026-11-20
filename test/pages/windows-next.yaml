@@ -1,0 +1,16 @@
+appId: page.demo
+name: Next window after a switch
+driver: chromium
+locale: en
+---
+- launchApp
+- tapOn: "Open update"
+- tapOn: "Open proxy"
+- switchToWindow:
+    file: update.html
+- waitForPopup:
+    timeout: 3000
+- assertVisible: "Direct connection"
+- switchToMain
+- assertVisible: "Open update"
+- stopApp

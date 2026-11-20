@@ -8,6 +8,7 @@ import { PNG } from "pngjs";
 import type { Page } from "playwright-core";
 import { FlowError } from "../types.js";
 import { packageRoot } from "../util/paths.js";
+import type { ScreenBounds } from "./window-target.js";
 
 export type Rect = { x: number; y: number; width: number; height: number };
 
@@ -36,7 +37,16 @@ export type NativeFrame = FrameLayout & { png: Buffer };
 
 export type NativeApp = { pid: number; appPath: string; hwnd?: string };
 
-export type NativePopup = { hwnd: string; title: string; className?: string };
+export type NativePopup = {
+  hwnd: string;
+  title: string;
+  className?: string;
+  bounds?: ScreenBounds;
+  /** Client area in physical pixels, the size a page in that window fills. */
+  client?: Size;
+};
+
+type Size = { width: number; height: number };
 
 export type PixelHint = { width: number; height: number; cssWidth: number; cssHeight: number };
 
@@ -125,6 +135,92 @@ export function popupMatchingTitle(windows: NativePopup[], title: string): Nativ
   return windows.find(window => window.title.trim() === wanted) ?? null;
 }
 
+/** A page of `page` pixels fills this client area. */
+export function sizeFits(client: Size, page: Size): boolean {
+  return near(client.width, page.width) && near(client.height, page.height);
+}
+
+/** Drawing a page of `page` pixels into this client area keeps its proportions. Unknown sizes count as a fit. */
+export function shapeFits(client: Size, page: Size): boolean {
+  if (client.width <= 0 || client.height <= 0 || page.width <= 0 || page.height <= 0) return true;
+  const height = (page.height * client.width) / page.width;
+  return Math.abs(height - client.height) <= Math.max(24, client.height / 12);
+}
+
+/** The one popup whose client area fits the page. The page title breaks a tie between same-size popups. */
+export function popupFittingPage(
+  windows: NativePopup[],
+  page: Size & { title: string },
+  skip?: string
+): NativePopup | null {
+  const fits = windows.filter(
+    window => window.hwnd !== skip && !isClassicDialog(window) && window.client && sizeFits(window.client, page)
+  );
+  if (fits.length === 1) return fits[0]!;
+  return popupMatchingTitle(fits, page.title);
+}
+
+/**
+ * The window that is showing this page.
+ * A wider window with the same title is not a match: painting the page into it stretches the preview.
+ */
+export function windowForPage(windows: NativePopup[], page: Size & { title: string }): NativePopup | null {
+  if (page.width <= 0 || page.height <= 0) return popupMatchingTitle(windows, page.title);
+  const sized = popupFittingPage(windows, page);
+  if (sized) return sized;
+  const shaped = windows.filter(
+    window => window.client && !isClassicDialog(window) && shapeFits(window.client, page)
+  );
+  if (shaped.length === 1) return shaped[0]!;
+  const shapedTitle = popupMatchingTitle(shaped, page.title);
+  if (shapedTitle) return shapedTitle;
+  const titled = popupMatchingTitle(windows, page.title);
+  if (titled && !titled.client) return titled;
+  return null;
+}
+
+/** True when the captured client has no real page pixels, so PrintWindow left a blank WebView. */
+export function clientIsBlank(framePng: Buffer, client: Rect): boolean {
+  let frame: PNG;
+  try {
+    frame = PNG.sync.read(framePng);
+  } catch {
+    return true;
+  }
+  const x0 = Math.max(0, Math.floor(client.x));
+  const y0 = Math.max(0, Math.floor(client.y));
+  const x1 = Math.min(frame.width, Math.floor(client.x + client.width));
+  const y1 = Math.min(frame.height, Math.floor(client.y + client.height));
+  if (x1 - x0 < 8 || y1 - y0 < 8) return true;
+  const stepX = Math.max(1, Math.floor((x1 - x0) / 8));
+  const stepY = Math.max(1, Math.floor((y1 - y0) / 8));
+  let sum = 0;
+  let sum2 = 0;
+  let n = 0;
+  for (let y = y0; y < y1; y += stepY) {
+    for (let x = x0; x < x1; x += stepX) {
+      const i = (y * frame.width + x) * 4;
+      const alpha = frame.data[i + 3] ?? 0;
+      const lum =
+        alpha < 16
+          ? 0
+          : ((frame.data[i] ?? 0) + (frame.data[i + 1] ?? 0) + (frame.data[i + 2] ?? 0)) / 3;
+      sum += lum;
+      sum2 += lum * lum;
+      n += 1;
+    }
+  }
+  if (n < 4) return true;
+  const mean = sum / n;
+  const variance = sum2 / n - mean * mean;
+  return variance < 12;
+}
+
+function near(actual: number, expected: number): boolean {
+  if (actual <= 0 || expected <= 0) return false;
+  return Math.abs(actual - expected) <= Math.max(24, expected / 8);
+}
+
 export function imageToPage(
   layout: FrameLayout,
   x: number,
@@ -184,6 +280,17 @@ export async function pagePixelHint(page: Page): Promise<PixelHint | undefined> 
   }
 }
 
+/** Show the app window once so its title bar can be captured the same way as a Tauri window. */
+export async function revealNativeWindow(app: NativeApp): Promise<boolean> {
+  if (process.platform !== "win32" || !app.pid) return false;
+  try {
+    const response = await helperRequest({ op: "reveal", ...requestFields(app) });
+    return response?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function captureNativeFrame(app: NativeApp, hint?: PixelHint): Promise<NativeFrame | null> {
   if (process.platform !== "win32") return null;
   try {
@@ -237,11 +344,159 @@ export async function listNativePopups(app: NativeApp): Promise<NativePopup[]> {
   }
   return response.windows
     .filter(window => typeof window.hwnd === "string" && window.hwnd && typeof window.title === "string")
-    .map(window => ({
-      hwnd: window.hwnd as string,
-      title: window.title as string,
-      ...(typeof window.className === "string" && window.className ? { className: window.className } : {})
-    }));
+    .map(window => {
+      const bounds = finiteBounds(window.bounds);
+      const client = finiteSize(window.client);
+      return {
+        hwnd: window.hwnd as string,
+        title: window.title as string,
+        ...(typeof window.className === "string" && window.className ? { className: window.className } : {}),
+        ...(bounds ? { bounds } : {}),
+        ...(client ? { client } : {})
+      };
+    });
+}
+
+function finiteSize(value: { width?: number; height?: number } | undefined): Size | undefined {
+  const width = Number(value?.width);
+  const height = Number(value?.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) return undefined;
+  return { width, height };
+}
+
+function finiteBounds(value: { x?: number; y?: number; width?: number; height?: number; dpi?: number } | undefined): ScreenBounds | undefined {
+  if (!value) return undefined;
+  const x = Number(value.x);
+  const y = Number(value.y);
+  const width = Number(value.width);
+  const height = Number(value.height);
+  if (![x, y, width, height].every(Number.isFinite) || width < 1 || height < 1) return undefined;
+  const dpi = Number(value.dpi);
+  return { x, y, width, height, ...(Number.isFinite(dpi) && dpi > 0 ? { dpi } : {}) };
+}
+
+export type SystemBrowserPage = { url: string; hwnd: string; pid: number; appPath: string };
+
+export type SystemBrowserSnapshot = { foreground: string; browser: boolean; pages: SystemBrowserPage[] };
+
+/** The page that appeared in the system browser since the previous snapshot. */
+export function chooseOpenedBrowserPage(
+  before: readonly SystemBrowserPage[],
+  current: readonly SystemBrowserPage[],
+  foregroundHwnd: string,
+  needle: string
+): SystemBrowserPage | null {
+  const wanted = needle.trim().toLowerCase();
+  const previous = new Map(before.map(page => [page.hwnd, page.url]));
+  const opened = current.filter(page => {
+    if (wanted && !page.url.toLowerCase().includes(wanted)) return false;
+    const seen = previous.get(page.hwnd);
+    return seen === undefined || seen !== page.url;
+  });
+  if (opened.length === 0) return null;
+  return opened.find(page => page.hwnd === foregroundHwnd) ?? (opened.length === 1 ? opened[0]! : null);
+}
+
+/** Addresses currently showing in Edge, Chrome, Firefox, Brave, and Opera. */
+export async function readSystemBrowsers(): Promise<SystemBrowserSnapshot | null> {
+  if (process.platform !== "win32") return null;
+  try {
+    const response = await helperRequest({ op: "browserPages" }, 12_000);
+    if (!response?.ok || !Array.isArray(response.pages)) return null;
+    const pages: SystemBrowserPage[] = [];
+    for (const page of response.pages) {
+      const parsed = browserPage(page);
+      if (parsed) pages.push(parsed);
+    }
+    return { foreground: (response.foreground ?? "").trim(), browser: response.browser === true, pages };
+  } catch {
+    return null;
+  }
+}
+
+function browserPage(page: { url?: string; hwnd?: string; procId?: number; image?: string } | undefined): SystemBrowserPage | null {
+  const url = (page?.url ?? "").trim();
+  const hwnd = (page?.hwnd ?? "").trim();
+  const appPath = (page?.image ?? "").trim();
+  const pid = Number(page?.procId);
+  if (!hwnd || !appPath || !Number.isInteger(pid) || pid <= 0) return null;
+  if (!/^https?:\/\//i.test(url)) return null;
+  return { url, hwnd, pid, appPath };
+}
+
+/** Bring the browser window that switchToBrowser found to the front. */
+export async function focusSystemBrowser(app: NativeApp): Promise<void> {
+  if (process.platform !== "win32" || !app.hwnd) return;
+  try {
+    await helperRequest({ op: "browserFocus", ...requestFields(app) }, 8_000);
+  } catch {
+    // The address already matched. Commands can still use the window if it stays in front.
+  }
+}
+
+/** The open system-browser window whose address bar contains fragment. */
+export async function readSystemBrowserUrl(fragment: string): Promise<SystemBrowserPage | null> {
+  const needle = fragment.trim().toLowerCase();
+  if (!needle || process.platform !== "win32") return null;
+  try {
+    const response = await helperRequest({ op: "browserUrl", text: fragment.trim() }, 8_000);
+    const url = (response?.url ?? "").trim();
+    const hwnd = (response?.hwnd ?? "").trim();
+    const appPath = (response?.image ?? "").trim();
+    const pid = Number(response?.procId);
+    if (!response?.ok || !hwnd || !appPath || !Number.isInteger(pid) || pid <= 0) return null;
+    if (!url.toLowerCase().includes(needle) || !/^https?:\/\//i.test(url)) return null;
+    return { url, hwnd, pid, appPath };
+  } catch {
+    return null;
+  }
+}
+
+export async function listTrayApps(): Promise<string[]> {
+  return trayNames({ op: "trayApps" }, "Could not read the taskbar.");
+}
+
+export async function listTrayMenuItems(app: NativeApp): Promise<string[]> {
+  return trayNames({ op: "trayList", procId: app.pid, appPath: app.appPath }, "Could not read the taskbar menu.");
+}
+
+export async function listNamedTrayMenu(iconName: string): Promise<string[]> {
+  return trayNames({ op: "trayList", procId: 0, appPath: "", text: iconName }, "Could not read the taskbar menu.");
+}
+
+async function trayNames(body: Record<string, unknown>, fallback: string): Promise<string[]> {
+  if (process.platform !== "win32") {
+    throw new FlowError("The taskbar menu is available on Windows.");
+  }
+  let response: HelperResponse | null = null;
+  try {
+    response = await helperRequest(body, 12_000);
+  } catch (err) {
+    throw new FlowError(err instanceof Error ? err.message : fallback);
+  }
+  if (!response?.ok) throw new FlowError(response?.error || fallback);
+  return (response.items ?? []).filter(item => item.trim()).map(item => item.trim());
+}
+
+export async function openTrayMenu(app: NativeApp, item: string): Promise<void> {
+  await sendTray({ op: "tray", procId: app.pid, appPath: app.appPath, name: item });
+}
+
+export async function openNamedTrayMenu(iconName: string, item: string): Promise<void> {
+  await sendTray({ op: "tray", procId: 0, appPath: "", name: item, text: iconName });
+}
+
+async function sendTray(body: Record<string, unknown>): Promise<void> {
+  if (process.platform !== "win32") {
+    throw new FlowError("The taskbar menu is available on Windows.");
+  }
+  let response: HelperResponse | null = null;
+  try {
+    response = await helperRequest(body, 12_000);
+  } catch (err) {
+    throw new FlowError(err instanceof Error ? err.message : "Could not use the taskbar menu.");
+  }
+  if (!response?.ok) throw new FlowError(response?.error || "Could not use the taskbar menu.");
 }
 
 export async function invokeNativeControl(app: NativeApp, name: string, timeoutMs = 0): Promise<void> {
@@ -394,7 +649,21 @@ type HelperResponse = {
   popup?: boolean;
   visible?: boolean;
   text?: string;
-  windows?: { hwnd?: string; title?: string; className?: string }[];
+  items?: string[];
+  url?: string;
+  hwnd?: string;
+  procId?: number;
+  image?: string;
+  foreground?: string;
+  browser?: boolean;
+  pages?: { url?: string; hwnd?: string; procId?: number; image?: string }[];
+  windows?: {
+    hwnd?: string;
+    title?: string;
+    className?: string;
+    bounds?: { x?: number; y?: number; width?: number; height?: number; dpi?: number };
+    client?: { width?: number; height?: number };
+  }[];
   controls?: { name?: string; kind?: string; bounds?: Rect }[];
 };
 

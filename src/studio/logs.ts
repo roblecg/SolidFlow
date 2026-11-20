@@ -47,6 +47,8 @@ export type TestRunLog = {
   startedAt: string;
   finishedAt?: string;
   status: "running" | "passed" | "failed" | "stopped";
+  /** Still running, holding before its next step. */
+  paused?: boolean;
   steps: TestStepLog[];
   sectionDefs: TestSectionDef[];
 };
@@ -126,7 +128,13 @@ export function finishTestRun(runId: string, status: "passed" | "failed" | "stop
   const run = testRuns.find(item => item.id === runId);
   if (!run) return;
   run.status = status;
+  run.paused = false;
   run.finishedAt = new Date().toISOString();
+}
+
+export function pauseTestRun(runId: string, paused: boolean): void {
+  const run = testRuns.find(item => item.id === runId);
+  if (run && run.status === "running") run.paused = paused;
 }
 
 function liveSections(run: TestRunLog): TestSectionLog[] {
@@ -173,6 +181,66 @@ export function clearTestRuns(): void {
   testRuns.length = 0;
 }
 
+function switchBrowserLabel(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "null") return "Switch to the browser";
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed == null) return "Switch to the browser";
+    if (typeof parsed === "string" && parsed.trim()) return `Switch to the browser at ${parsed.trim()}`;
+    if (parsed && typeof parsed === "object") {
+      const url = (parsed as { url?: unknown }).url;
+      if (typeof url === "string" && url.trim()) return `Switch to the browser at ${url.trim()}`;
+      return "Switch to the browser";
+    }
+  } catch {
+    // The log line is already plain text.
+  }
+  const plain = trimmed.replace(/^"|"$/g, "").trim();
+  return plain ? `Switch to the browser at ${plain}` : "Switch to the browser";
+}
+
+function switchWindowLabel(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "Switch to window";
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (typeof parsed === "string") return `Switch to window "${parsed}"`;
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as { file?: unknown; title?: unknown; text?: unknown };
+      const name = [record.file, record.title, record.text].find(item => typeof item === "string" && item);
+      if (typeof name === "string") return `Switch to window "${name}"`;
+    }
+  } catch {
+    // The log line is already plain text.
+  }
+  return `Switch to window "${trimmed.replace(/^"|"$/g, "")}"`;
+}
+
+function trayMenuLabel(raw: string): string {
+  const trimmed = raw.trim();
+  let item = trimmed;
+  let app = "";
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as { item?: unknown; app?: unknown };
+      if (typeof parsed.item === "string") item = parsed.item;
+      if (typeof parsed.app === "string") app = parsed.app.trim();
+    } catch {
+      item = trimmed;
+    }
+  } else if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      item = JSON.parse(trimmed) as string;
+    } catch {
+      item = trimmed.slice(1, -1);
+    }
+  }
+  item = item.trim();
+  if (app && item) return `Open "${item}" from ${app} on the taskbar`;
+  return item ? `Open "${item}" from the taskbar` : "Open the taskbar menu";
+}
+
 function windowControlLabel(value: string): string | null {
   const labels: Record<string, string> = {
     "window:close": "Close",
@@ -190,6 +258,15 @@ export function formatStepLabel(command: string): string {
   if (command === "clearState") return "Clear app state";
   if (command === "waitForPopup" || command.startsWith("waitForPopup")) return "Wait for the next window";
   if (command === "switchToMain") return "Switch to the original window";
+  if (command === "switchToBrowser" || command.startsWith("switchToBrowser")) {
+    return switchBrowserLabel(command.slice("switchToBrowser".length).replace(/^:\s*/, ""));
+  }
+  if (command === "switchToWindow" || command.startsWith("switchToWindow")) {
+    return switchWindowLabel(command.slice("switchToWindow".length).replace(/^:\s*/, ""));
+  }
+  if (command === "trayMenu" || command.startsWith("trayMenu")) {
+    return trayMenuLabel(command.slice("trayMenu".length).replace(/^:\s*/, ""));
+  }
   const match = /^(\w+):\s*([\s\S]*)$/.exec(command);
   if (!match) return command;
   const name = match[1] ?? command;

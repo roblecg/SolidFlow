@@ -37,6 +37,7 @@ button { cursor: pointer; }
   grid-template-rows: minmax(0, 1fr) 8px var(--log-height);
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 .split {
   position: relative;
@@ -263,15 +264,20 @@ html[data-edge="top-right"], html[data-edge="bottom-left"] { cursor: nesw-resize
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   padding: 0 12px;
   border-bottom: 1px solid var(--line);
+  overflow: hidden;
+  container-type: inline-size;
 }
 .log-tab {
+  flex: 0 0 auto;
   border: 0;
   background: #f2f4f7;
   color: var(--text);
   border-radius: 8px;
   padding: 6px 14px;
+  white-space: nowrap;
 }
 .log-tab.active { background: #fff; box-shadow: inset 0 0 0 1px var(--line); font-weight: 650; }
 .log-body { overflow: auto; padding: 8px 16px 4px; }
@@ -381,6 +387,7 @@ html[data-edge="top-right"], html[data-edge="bottom-left"] { cursor: nesw-resize
   grid-template-columns: minmax(0, 1fr) 8px var(--flows-width);
   min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 .workspace > .pane { border-right: 0; border-left: 0; }
 .pane-tools { padding: 8px 12px 0; }
@@ -440,6 +447,8 @@ html[data-edge="top-right"], html[data-edge="bottom-left"] { cursor: nesw-resize
   min-width: 0;
   min-height: 0;
 }
+/* DO NOT set height: 100% or object-fit: fill. That stretches the Customer Portal preview.
+   The stage aspect is the captured image (--stage-ratio). See frameOf in session.ts. */
 .stage img {
   display: block;
   width: 100%;
@@ -659,6 +668,7 @@ html[data-edge="top-right"], html[data-edge="bottom-left"] { cursor: nesw-resize
 }
 .btn-stop:hover { background: #b42318; }
 .log-run-meta .stopped { color: #b54708; }
+.log-run-meta .paused { color: var(--muted); }
 
 .menu, .flyout {
   position: fixed;
@@ -702,6 +712,12 @@ html[data-edge="top-right"], html[data-edge="bottom-left"] { cursor: nesw-resize
 }
 .menu button:disabled, .flyout button:disabled { color: var(--muted); cursor: not-allowed; }
 .menu .hint, .flyout .hint { padding: 6px 10px 8px; color: var(--accent-ink); font-size: 12px; font-weight: 650; }
+.menu.window-suggest { min-width: 280px; max-width: 440px; max-height: 240px; z-index: 30; }
+.menu.window-suggest button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.menu.window-suggest button.active,
+.menu.window-suggest button:hover { background: #fff4ea; }
+.menu.window-suggest .window-file { font-family: Consolas, "Cascadia Mono", ui-monospace, monospace; font-size: 13px; color: var(--text); }
+.menu.window-suggest .window-label { font-size: 12px; color: var(--muted); font-weight: 400; }
 
 .folder-modal {
   position: fixed;
@@ -837,6 +853,39 @@ body.picking .app {
 }
 .folder-done:disabled { opacity: 0.35; cursor: default; }
 
+#status {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#run, #pause { flex: 0 0 auto; white-space: nowrap; }
+#pause {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 6rem;
+}
+.pause-icon {
+  width: 10px;
+  height: 11px;
+  box-sizing: border-box;
+  border-left: 3px solid currentColor;
+  border-right: 3px solid currentColor;
+}
+#pause.is-paused .pause-icon {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 6px 0 6px 10px;
+  border-color: transparent transparent transparent currentColor;
+}
+@container (max-width: 640px) {
+  #pause { min-width: 0; padding-inline: 12px; }
+  .pause-label { display: none; }
+}
 .status.ok { color: var(--ok); }
 .status.bad { color: var(--bad); }
 .log {

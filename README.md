@@ -1,12 +1,13 @@
 # SolidFlow
 
-YAML E2E runner for Windows desktop apps (WebView2 / Tauri) with a plugin seam for mobile and web drivers later.
+YAML E2E runner for Windows desktop apps (WebView2 / Tauri and Electron) with a plugin seam for mobile and web drivers later.
 
 ## Requirements
 
 - Node.js >= 24.20
 - Windows 11 (WebView2 runtime) for driving packaged Tauri apps
 - Built **CIM Document Exporter** exe when running CIM flows (`SOLIDFLOW_APP_PATH`)
+- Installed **Kyocera Cloud Print and Scan** (`JcsUiAgent.exe`) when running that Electron app. StatusMonitorSvc must be listening on `127.0.0.1:5570`
 
 ## Install
 
@@ -58,6 +59,28 @@ tags: [smoke, login]
 ```
 
 `SOLIDFLOW_APP_PATH` is used only when the flow has no `appPath`. It must be the full path to a built `.exe`.
+
+WebView2 and Tauri apps stay on the WebView2 driver. A packaged Electron exe is detected from the files beside it (`resources/app.asar` and the Chromium packs) and launched with `--remote-debugging-port`. Set `driver: webview2` or `driver: electron` on the flow when you want to force one.
+
+Kyocera Cloud Print and Scan is Electron. Point `appPath` at `JcsUiAgent.exe`, not the `cloudprintscan_*.exe` installer:
+
+```yaml
+appPath: "C:/Program Files/Kyocera/Kyocera Cloud Print and Scan/JcsUiAgent/JcsUiAgent.exe"
+---
+- launchApp
+```
+
+Print status, Update available, and Proxy settings can be open together. `switchToWindow` selects one by its page file, its caption, or a heading in the page. `switchToMain` still returns to the window that was open at connect. `waitForPopup` still follows the next new window.
+
+```yaml
+- switchToWindow:
+    file: ProxySettings.html
+- tapOn: "OK"
+- switchToWindow:
+    text: "Update available"
+- tapOn: "Skip this version"
+- switchToMain
+```
 
 - `SOLIDFLOW_ALLOW_SHELL=1` — enable `executeShellCommand` (argv only, cwd confined)
 - `SOLIDFLOW_REPORT_DIR` — optional override. By default every run is saved in the workspace `test-results` folder.

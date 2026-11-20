@@ -8,7 +8,13 @@ import {
   captionActionFor,
   captureNativeFrame,
   chooseNativePopup,
+  chooseOpenedBrowserPage,
+  clientIsBlank,
+  popupFittingPage,
   popupMatchingTitle,
+  shapeFits,
+  windowForPage,
+  sizeFits,
   isClassicDialog,
   clipRect,
   compositePageIntoFrame,
@@ -25,6 +31,10 @@ import {
   stopNativeFrameHost,
   type FrameLayout
 } from "../src/driver/native-frame.js";
+
+function page(hwnd: string, url: string) {
+  return { hwnd, url, pid: 1, appPath: "C:/browser.exe" };
+}
 
 const sample: FrameLayout = {
   title: "CIM Document Exporter",
@@ -68,6 +78,18 @@ describe("native window header", () => {
     expect(imageToPage(sample, 4, 10, 492, 326)).toBeNull();
   });
 
+  it("chooses the browser page that just opened", () => {
+    const before = [page("1", "https://mail.example/inbox"), page("2", "https://work.example/board")];
+    const opened = page("1", "https://login.example/authorize");
+    expect(chooseOpenedBrowserPage(before, [opened, before[1]!], "1", "")).toEqual(opened);
+    expect(chooseOpenedBrowserPage(before, [before[0]!, before[1]!], "1", "")).toBeNull();
+    expect(chooseOpenedBrowserPage(before, [opened, page("2", "https://work.example/other")], "9", "")).toBeNull();
+    expect(chooseOpenedBrowserPage(before, [opened, page("3", "https://news.example")], "9", "")).toBeNull();
+    expect(chooseOpenedBrowserPage(before, [before[0]!, page("3", "https://news.example")], "1", "")?.hwnd).toBe("3");
+    expect(chooseOpenedBrowserPage(before, [opened, before[1]!], "1", "login.example")).toEqual(opened);
+    expect(chooseOpenedBrowserPage(before, [opened, before[1]!], "1", "work.example")).toBeNull();
+  });
+
   it("keeps page targets out of the title bar", () => {
     expect(clipRect({ x: 0, y: 20, width: 100, height: 40 }, sample.client)).toEqual({
       x: 8,
@@ -100,6 +122,55 @@ describe("native window header", () => {
     expect(pixel(out, 0, 0)).toEqual([240, 240, 240, 255]);
     expect(pixel(out, 1, 0)).toEqual([0, 0, 0, 0]);
     expect(pixel(out, 1, 2)).toEqual([12, 90, 180, 255]);
+  });
+
+  it("only paints a page into a client area of the same shape", () => {
+    expect(shapeFits({ width: 984, height: 652 }, { width: 984, height: 652 })).toBe(true);
+    expect(shapeFits({ width: 1968, height: 1304 }, { width: 984, height: 652 })).toBe(true);
+    expect(shapeFits({ width: 984, height: 652 }, { width: 984, height: 630 })).toBe(true);
+    expect(shapeFits({ width: 984, height: 652 }, { width: 480, height: 640 })).toBe(false);
+    expect(shapeFits({ width: 984, height: 652 }, { width: 0, height: 0 })).toBe(true);
+    expect(sizeFits({ width: 480, height: 640 }, { width: 482, height: 638 })).toBe(true);
+    expect(sizeFits({ width: 984, height: 652 }, { width: 480, height: 640 })).toBe(false);
+  });
+
+  it("finds the popup a page fits when its title is not the page title", () => {
+    const login = { hwnd: "login", title: "EDC Document Exporter", className: "Chrome_WidgetWin_1", client: { width: 480, height: 640 } };
+    const settings = { hwnd: "settings", title: "Settings", className: "Chrome_WidgetWin_1", client: { width: 900, height: 600 } };
+    const folder = { hwnd: "folder", title: "Select output folder", className: "#32770", client: { width: 480, height: 640 } };
+    const page = { width: 480, height: 640, title: "Customer Portal" };
+    expect(popupFittingPage([settings, folder, login], page)?.hwnd).toBe("login");
+    expect(popupFittingPage([settings, login], page, "login")).toBeNull();
+    expect(popupFittingPage([settings], page)).toBeNull();
+    const twin = { ...login, hwnd: "twin", title: "Customer Portal" };
+    expect(popupFittingPage([login, twin], page)?.hwnd).toBe("twin");
+    expect(popupFittingPage([login, { ...login, hwnd: "copy" }], page)).toBeNull();
+  });
+
+  it("keeps a portrait page on its own window instead of a wider one with the same title", () => {
+    const wide = { hwnd: "wide", title: "EDC Document Exporter", client: { width: 1536, height: 960 } };
+    const portal = { hwnd: "portal", title: "EDC Document Exporter", client: { width: 720, height: 960 } };
+    const page = { width: 480, height: 640, title: "EDC Document Exporter" };
+    expect(windowForPage([wide, portal], page)?.hwnd).toBe("portal");
+    expect(windowForPage([wide], page)).toBeNull();
+    expect(windowForPage([{ hwnd: "portal", title: "Customer Portal" }], { width: 0, height: 0, title: "Customer Portal" })?.hwnd).toBe(
+      "portal"
+    );
+  });
+
+  it("treats an empty client as blank and a painted page as visible", () => {
+    const blank = solid(20, 20, [244, 244, 244, 255]);
+    expect(clientIsBlank(PNG.sync.write(blank), { x: 2, y: 4, width: 16, height: 14 })).toBe(true);
+    const painted = solid(20, 20, [244, 244, 244, 255]);
+    for (let y = 8; y < 14; y++) {
+      for (let x = 4; x < 16; x++) {
+        const i = (y * painted.width + x) * 4;
+        painted.data[i] = 20;
+        painted.data[i + 1] = 90;
+        painted.data[i + 2] = 180;
+      }
+    }
+    expect(clientIsBlank(PNG.sync.write(painted), { x: 0, y: 0, width: 20, height: 20 })).toBe(false);
   });
 
   it("ignores windows that were already open and follows a new folder window", () => {
@@ -183,6 +254,8 @@ describe("native window header", () => {
       const frame = await captureNativeFrame({ pid: probe.pid ?? 0, appPath: exe, hwnd: popup.hwnd });
       expect(frame, lastNativeFrameError()).toBeTruthy();
       expect(frame?.popup).toBe(true);
+      expect(popup.client?.width).toBeGreaterThan(0);
+      if (frame && popup.client) expect(sizeFits(popup.client, frame.client)).toBe(true);
       expect(frame?.controls.some(control => control.label === "Cancel")).toBe(true);
       await invokeNativeControl({ pid: probe.pid ?? 0, appPath: exe, hwnd: popup.hwnd }, "Cancel");
       const gone = await waitUntil(async () => {

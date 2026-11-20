@@ -26,6 +26,7 @@ import { defaultLocatorResolver } from "../driver/locator.js";
 import type { AutomationDriver } from "../driver/types.js";
 import { loadConfigFromAncestors, resolveAppPath, shellAllowed } from "../config.js";
 import { interpolateEnv } from "../util/ids.js";
+import { parseWindowQuery, type WindowQuery } from "../driver/window-target.js";
 import { uniqueRunFolder } from "../report/run-folder.js";
 import { reportRoot as workspaceReportRoot } from "../studio/workspace.js";
 import { writeReports } from "../report/index.js";
@@ -40,6 +41,8 @@ import {
   nativeTextVisible,
   pagePixelHint,
   parseWindowControl,
+  openNamedTrayMenu,
+  openTrayMenu,
   performCaptionAction,
   setNativeText,
   type CaptionAction,
@@ -48,9 +51,45 @@ import {
 
 const activeAppLocks = new Set<string>();
 const FIELD_WAIT_MS = 20_000;
+const STOP_GRACE_MS = 2_000;
+const PAUSED_PREVIEW_MS = 1_500;
+
+/** Holds a run before its next step until it is resumed. */
+export class RunPause {
+  private paused = false;
+  private readonly resumers = new Set<() => void>();
+
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  set(paused: boolean): void {
+    this.paused = paused;
+    if (paused) return;
+    for (const resume of [...this.resumers]) resume();
+  }
+
+  /** Resolves on resume, on abort, or after `ms`, whichever comes first. */
+  wait(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!this.paused || signal?.aborted) return Promise.resolve();
+    return new Promise(resolve => {
+      const done = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", done);
+        this.resumers.delete(done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      signal?.addEventListener("abort", done, { once: true });
+      this.resumers.add(done);
+    });
+  }
+}
 
 type ExecState = {
   driver: AutomationDriver | null;
+  /** The app being launched, until connect returns. */
+  connecting?: AutomationDriver | null;
   env: Record<string, string>;
   flowDir: string;
   screenshotDir: string;
@@ -68,12 +107,19 @@ export type RunnerOptions = RunOptions & {
   driverSlot?: DriverSlot;
   /** Chromium start page. Desktop flows launch appPath instead. */
   pageUrl?: string;
-  /** When aborted, finish the current step then stop before the next one. */
+  /**
+   * When aborted, the run ends. A step still running after a short grace has its app closed,
+   * so it cannot keep clicking after the run reports stopped.
+   */
   signal?: AbortSignal;
+  /** While paused, the run waits before its next step with the app left open. */
+  pause?: RunPause;
+  /** Called when the run starts and stops waiting on `pause`. */
+  onPause?: (paused: boolean) => void;
   onStep?: (event: {
     index: number;
     command: string;
-    status: "running" | "passed" | "failed";
+    status: "running" | "passed" | "failed" | "skipped";
     durationMs?: number;
     error?: string;
     sectionNumber?: number;
@@ -137,9 +183,9 @@ async function runFlowOnce(
     ...(options.env ?? {})
   };
 
-  const driverKind = inferDriver(flow.driver);
   const config = loadConfigFromAncestors(options.cwd ?? process.cwd());
   const appPath = flow.appPath || configAppPath || resolveAppPath(config);
+  const driverKind = inferDriver(flow.driver, appPath);
   const pageUrl = options.pageUrl;
 
   const state: ExecState = {
@@ -169,9 +215,21 @@ async function runFlowOnce(
       : normalizeFlowSections(flow.steps);
   const execSteps = normalized.steps;
   const flowSections = normalized.sections;
+  const usesBrowser = execSteps.some(step => commandName(step) === "switchToBrowser");
+  const hold = async () => {
+    const pause = options.pause;
+    if (!pause?.isPaused || options.signal?.aborted) return;
+    options.onPause?.(true);
+    while (pause.isPaused && !options.signal?.aborted) {
+      await pause.wait(PAUSED_PREVIEW_MS, options.signal);
+      if (pause.isPaused && state.driver) await options.onPreview?.(state.driver).catch(() => {});
+    }
+    options.onPause?.(false);
+  };
 
   try {
     for (let i = 0; i < execSteps.length; i++) {
+      await hold();
       if (options.signal?.aborted) {
         status = "stopped";
         runError = new RunStoppedError();
@@ -193,19 +251,41 @@ async function runFlowOnce(
         const t0 = Date.now();
         const command = formatStep(step);
         options.onStep?.({ index: i, command, status: "running", sectionNumber });
+        const stopHere = () => {
+          status = "stopped";
+          runError = new RunStoppedError();
+          stepReport = { index: i, command, status: "skipped", durationMs: Date.now() - t0, sectionNumber };
+          steps.push(stepReport);
+          options.onStep?.({ index: i, command, status: "skipped", durationMs: stepReport.durationMs, sectionNumber });
+        };
         try {
-          await executeStep(step, state, flow, {
-            appPath,
-            driverKind,
-            pageUrl,
-            locale: flow.locale ?? "en",
-            headless: options.headless,
-            screenshotDir,
-            reportDir,
-            flowPath,
-            paceMs,
-            sectionName
-          });
+          const work = (async () => {
+            if (usesBrowser && state.driver && commandName(step) !== "switchToBrowser") {
+              const nextIsSwitch = i + 1 < execSteps.length && commandName(execSteps[i + 1]!) === "switchToBrowser";
+              if (nextIsSwitch || !state.driver.hasBrowserBaseline()) {
+                await state.driver.noteSystemBrowser(nextIsSwitch);
+              }
+            }
+            await executeStep(step, state, flow, {
+              appPath,
+              driverKind,
+              pageUrl,
+              locale: flow.locale ?? "en",
+              headless: options.headless,
+              screenshotDir,
+              reportDir,
+              flowPath,
+              paceMs,
+              sectionName,
+              signal: options.signal,
+              hold
+            });
+          })();
+          if (await stoppedDuring(work, options.signal, () => closeRunApp(state))) {
+            stopHere();
+            break;
+          }
+          await work;
           if (state.driver) await options.onPreview?.(state.driver).catch(() => {});
           if (paceMs) await delay(paceMs, options.signal);
           stepReport = {
@@ -226,8 +306,12 @@ async function runFlowOnce(
           });
           break;
         } catch (err) {
+          if (options.signal?.aborted) {
+            stopHere();
+            break;
+          }
           const msg = err instanceof Error ? err.message : String(err);
-          if (attempt < stepRetry && !options.signal?.aborted) {
+          if (attempt < stepRetry) {
             await delay(500, options.signal);
             continue;
           }
@@ -322,6 +406,9 @@ type StepCtx = {
   paceMs: number;
   /** Current section (or Unassigned / flow) name for archive paths. */
   sectionName?: string;
+  signal?: AbortSignal;
+  /** Waits while the run is paused, so steps inside repeat or runFlow pause too. */
+  hold?: () => Promise<void>;
 };
 
 async function executeStep(
@@ -330,12 +417,101 @@ async function executeStep(
   flow: FlowDocument,
   ctx: StepCtx
 ): Promise<void> {
+  await ctx.hold?.();
+  if (ctx.signal?.aborted) throw new RunStoppedError();
   try {
     await executeStepBody(step, state, flow, ctx);
   } catch (err) {
-    if (stepIsOptional(step)) return;
+    if (stepIsOptional(step) && !(err instanceof RunStoppedError)) return;
     throw err;
   }
+}
+
+/**
+ * True when Stop came before the step finished.
+ * A step still running after the grace has its app closed, which also ends any wait inside it.
+ */
+async function stoppedDuring(
+  work: Promise<void>,
+  signal: AbortSignal | undefined,
+  closeApp: () => Promise<void>
+): Promise<boolean> {
+  if (!signal) return false;
+  const finished = work.then(
+    () => "finished" as const,
+    () => "finished" as const
+  );
+  const stop = whenAborted(signal);
+  try {
+    if ((await Promise.race([finished, stop.promise])) === "finished") return false;
+  } finally {
+    stop.dispose();
+  }
+  if ((await Promise.race([finished, after(STOP_GRACE_MS)])) === "finished") return false;
+  await closeApp();
+  return true;
+}
+
+function whenAborted(signal: AbortSignal): { promise: Promise<"stopped">; dispose: () => void } {
+  let dispose = () => {};
+  const promise = new Promise<"stopped">(resolve => {
+    if (signal.aborted) {
+      resolve("stopped");
+      return;
+    }
+    const onAbort = () => resolve("stopped");
+    signal.addEventListener("abort", onAbort, { once: true });
+    dispose = () => signal.removeEventListener("abort", onAbort);
+  });
+  return { promise, dispose };
+}
+
+function after(ms: number): Promise<"late"> {
+  return new Promise(resolve => setTimeout(() => resolve("late"), ms).unref());
+}
+
+async function closeRunApp(state: ExecState): Promise<void> {
+  const open = [state.driver, state.connecting].filter((item): item is AutomationDriver => item != null);
+  state.driver = null;
+  state.connecting = null;
+  await Promise.all(open.map(item => item.disconnect().catch(() => {})));
+}
+
+function announceOnPage(driver: AutomationDriver): boolean {
+  return !driver.nativeApp()?.hwnd || driver.webWindowFocused();
+}
+
+function trayTarget(parsed: ReturnType<typeof parseStep>, env: Record<string, string>): { app: string; item: string } {
+  const text = (value: unknown) =>
+    interpolateEnv(typeof value === "string" || typeof value === "number" ? String(value) : "", env).trim();
+  if (parsed.kind === "kv") return { app: "", item: text(parsed.value) };
+  if (parsed.kind === "complex" && isRecord(parsed.value)) {
+    return { app: text(parsed.value.app), item: text(parsed.value.item) };
+  }
+  return { app: "", item: "" };
+}
+
+function windowQuery(parsed: ReturnType<typeof parseStep>, env: Record<string, string>): WindowQuery {
+  if (parsed.kind === "simple") {
+    throw new FlowError("switchToWindow needs a file name, a window title, or the heading in that window.");
+  }
+  const query = parseWindowQuery(parsed.value);
+  const fill = (value: string | undefined) => (value === undefined ? undefined : interpolateEnv(value, env));
+  return { file: fill(query.file), title: fill(query.title), text: fill(query.text), any: query.any };
+}
+
+function browserTarget(
+  parsed: ReturnType<typeof parseStep>,
+  env: Record<string, string>
+): { url: string; timeout: number } {
+  const text = (value: unknown) =>
+    interpolateEnv(typeof value === "string" || typeof value === "number" ? String(value) : "", env).trim();
+  if (parsed.kind === "kv") return { url: text(parsed.value), timeout: 30_000 };
+  if (parsed.kind === "complex" && isRecord(parsed.value)) {
+    const specified = parsed.value.timeout != null && String(parsed.value.timeout).trim() !== "";
+    return { url: text(parsed.value.url), timeout: specified ? popupTimeout(parsed.value) : 30_000 };
+  }
+  return { url: "", timeout: 30_000 };
 }
 
 function popupTimeout(value: unknown): number {
@@ -385,13 +561,13 @@ async function executeStepBody(
       state.driver = null;
     }
     await ensureDriver(state, flow, ctx);
-    if (state.driver) await focusAndAnnounce(state.driver, "launchApp", ctx.paceMs);
+    if (state.driver) await focusAndAnnounce(state.driver);
     return;
   }
 
   if (desktopCommandNeedsPage(name) || name === "killApp" || name === "evalScript" || name === "assertTrue" || name === "runScript") {
     if (desktopCommandNeedsPage(name) && !state.driver) await ensureDriver(state, flow, ctx);
-    if (state.driver) await focusAndAnnounce(state.driver, name, ctx.paceMs);
+    if (state.driver) await focusAndAnnounce(state.driver);
     const page = state.driver?.getPage();
     if (desktopCommandNeedsPage(name) && !page) throw new FlowError(`${name} requires a connected app`);
     await executeDesktopCommand(name, parsed.kind === "simple" ? undefined : parsed.value, {
@@ -412,12 +588,35 @@ async function executeStepBody(
     return;
   }
 
-  if (name === "waitForPopup" || name === "switchToMain") {
+  if (name === "waitForPopup" || name === "switchToMain" || name === "switchToWindow" || name === "switchToBrowser") {
     if (!state.driver) await ensureDriver(state, flow, ctx);
     const driver = state.driver!;
     if (name === "switchToMain") await driver.switchToMain();
-    else await driver.waitForPopup(popupTimeout(parsed.kind === "simple" ? undefined : parsed.value));
-    if (!driver.nativeApp()?.hwnd) await focusAndAnnounce(driver, name, ctx.paceMs);
+    else if (name === "switchToWindow") {
+      const value = parsed.kind === "simple" ? undefined : parsed.value;
+      await driver.switchToWindow(windowQuery(parsed, state.env), popupTimeout(value));
+    } else if (name === "switchToBrowser") {
+      const target = browserTarget(parsed, state.env);
+      await driver.switchToBrowser(target.url, target.timeout);
+    } else {
+      await driver.waitForPopup(popupTimeout(parsed.kind === "simple" ? undefined : parsed.value));
+    }
+    if (announceOnPage(driver)) await focusAndAnnounce(driver);
+    return;
+  }
+
+  if (name === "trayMenu") {
+    const target = trayTarget(parsed, state.env);
+    if (!target.item) throw new FlowError("trayMenu needs the menu item, such as Proxy settings.");
+    if (target.app) {
+      await openNamedTrayMenu(target.app, target.item);
+      return;
+    }
+    if (!state.driver) await ensureDriver(state, flow, ctx);
+    const driver = state.driver!;
+    const native = driver.nativeApp();
+    if (!native) throw new FlowError("The taskbar menu belongs to the connected Windows app.");
+    await openTrayMenu(native, target.item);
     return;
   }
 
@@ -538,7 +737,7 @@ async function executeStepBody(
 
   if (name === "executeScript") {
     if (!state.driver) await ensureDriver(state, flow, ctx);
-    await focusAndAnnounce(state.driver!, "executeScript", ctx.paceMs);
+    await focusAndAnnounce(state.driver!);
     const script = String(parsed.kind === "kv" ? parsed.value : "");
     await state.driver!.getPage().evaluate(`(0, eval)(${JSON.stringify(script)})`);
     return;
@@ -581,7 +780,7 @@ async function executeStepBody(
   if (!state.driver) await ensureDriver(state, flow, ctx);
   const driver = state.driver!;
   const page = driver.getPage();
-  if (!driver.nativeApp()?.hwnd) await focusAndAnnounce(driver, name, ctx.paceMs);
+  if (announceOnPage(driver)) await focusAndAnnounce(driver);
 
   const strVal = (v: unknown) => interpolateEnv(String(v), state.env);
 
@@ -806,25 +1005,10 @@ async function executeStepBody(
   }
 }
 
-async function focusAndAnnounce(
-  driver: AutomationDriver,
-  command: string,
-  paceMs: number
-): Promise<void> {
+async function focusAndAnnounce(driver: AutomationDriver): Promise<void> {
   const page = driver.getPage();
   await page.bringToFront().catch(() => {});
-  if (!paceMs) return;
-  const banner = `(() => {
-    let bar = document.getElementById("__solidFlow_step");
-    if (!bar) {
-      bar = document.createElement("div");
-      bar.id = "__solidFlow_step";
-      bar.style.cssText = "position:fixed;left:16px;bottom:16px;z-index:2147483647;background:#1c2330;color:#fff;padding:10px 14px;border-radius:8px;font:600 14px Segoe UI,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.25)";
-      document.documentElement.appendChild(bar);
-    }
-    bar.textContent = ${JSON.stringify(command)};
-  })()`;
-  await page.evaluate(banner).catch(() => {});
+  await page.evaluate(`document.getElementById("__solidFlow_step")?.remove()`).catch(() => {});
 }
 
 async function presentTarget(
@@ -872,6 +1056,7 @@ function driverSessionOpen(driver: AutomationDriver): boolean {
 }
 
 async function ensureDriver(state: ExecState, flow: FlowDocument, ctx: StepCtx): Promise<void> {
+  if (ctx.signal?.aborted) throw new RunStoppedError();
   if (state.driver && !driverSessionOpen(state.driver)) {
     state.userDataDir = state.driver.profileDir?.() ?? state.userDataDir;
     await state.driver.disconnect().catch(() => {});
@@ -882,17 +1067,33 @@ async function ensureDriver(state: ExecState, flow: FlowDocument, ctx: StepCtx):
     return;
   }
   const driver = createDriver(ctx.driverKind);
-  await driver.connect({
-    appId: flow.appId,
-    locale: ctx.locale,
-    appPath: ctx.appPath,
-    pageUrl: ctx.pageUrl,
-    headless: ctx.headless,
-    screenshotDir: ctx.screenshotDir,
-    userDataDir: state.userDataDir
-  });
+  state.connecting = driver;
+  try {
+    await driver.connect({
+      appId: flow.appId,
+      locale: ctx.locale,
+      appPath: ctx.appPath,
+      pageUrl: ctx.pageUrl,
+      headless: ctx.headless,
+      screenshotDir: ctx.screenshotDir,
+      userDataDir: state.userDataDir,
+      signal: ctx.signal
+    });
+  } catch (err) {
+    if (state.connecting === driver) state.connecting = null;
+    await driver.disconnect().catch(() => {});
+    throw err;
+  }
+  // Stop closed this app while it was starting.
+  if (state.connecting !== driver) throw new RunStoppedError();
+  state.connecting = null;
   state.driver = driver;
   state.userDataDir = driver.profileDir?.() ?? state.userDataDir;
+}
+
+function commandName(step: FlowStep): string {
+  if (typeof step === "string") return step;
+  return Object.keys(step)[0] ?? "";
 }
 
 function formatStep(step: FlowStep): string {
@@ -983,6 +1184,8 @@ async function actOnWindow(driver: AutomationDriver, action: CaptionAction): Pro
 }
 
 function activeNativeWindow(driver: AutomationDriver): NativeApp | null {
+  // A web dialog keeps its handle for the title bar. Its buttons are on the page.
+  if (driver.webWindowFocused()) return null;
   const native = driver.nativeApp();
   if (!native?.hwnd) return null;
   return native;

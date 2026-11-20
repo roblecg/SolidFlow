@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Print status</title>
+  </head>
+  <body>
+    <button id="open-update" type="button">Open update</button>
+    <button id="open-proxy" type="button">Open proxy</button>
+    <script>
+      function openPage(name) {
+        window.open(new URL(name, location.href).href, name);
+      }
+      document.getElementById("open-update").addEventListener("click", () => openPage("update.html"));
+      document.getElementById("open-proxy").addEventListener("click", () => openPage("proxy.html"));
+    </script>
+  </body>
+</html>

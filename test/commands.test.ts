@@ -38,6 +38,9 @@ describe("maestro command catalog", () => {
     expect(listCommands().filter(command => !command.available).length).toBeGreaterThan(0);
     expect(listCommands().some(command => command.name === "waitForPopup")).toBe(true);
     expect(listCommands().some(command => command.name === "switchToMain")).toBe(true);
+    expect(listCommands().some(command => command.name === "switchToWindow")).toBe(true);
+    expect(listCommands().some(command => command.name === "switchToBrowser")).toBe(true);
+    expect(listCommands().some(command => command.name === "trayMenu")).toBe(true);
   });
 
   it("rejects a device-only command before launching a browser", async () => {
